@@ -1,5 +1,5 @@
 <template>
-  <div class="flex flex-col h-screen w-screen bg-deaios-dark overflow-hidden font-sans">
+  <div class="flex flex-col h-screen w-screen bg-[#080c14] overflow-hidden font-sans">
     <!-- Top Header Bar -->
     <HeaderBar @trigger-estop="triggerEmergencyStop" />
 
@@ -22,12 +22,12 @@
     </main>
 
     <!-- Bottom Mobile Tab Bar -->
-    <nav class="bg-deaios-card/95 backdrop-blur-md border-t border-deaios-border px-6 py-2 flex items-center justify-around z-30 select-none pb-safe">
+    <nav class="bg-slate-900/95 backdrop-blur-md border-t border-slate-800 px-6 py-2 flex items-center justify-around z-30 select-none pb-safe">
       <button 
         @click="activeTab = 'map'" 
         :class="[
           'flex flex-col items-center space-y-1 transition text-xs font-medium',
-          activeTab === 'map' ? 'text-blue-400 font-bold' : 'text-slate-400 hover:text-slate-200'
+          activeTab === 'map' ? 'text-blue-400 font-bold' : 'text-slate-400 active:text-slate-200'
         ]"
       >
         <span class="text-lg">🗺️</span>
@@ -38,7 +38,7 @@
         @click="activeTab = 'devices'" 
         :class="[
           'flex flex-col items-center space-y-1 transition text-xs font-medium',
-          activeTab === 'devices' ? 'text-blue-400 font-bold' : 'text-slate-400 hover:text-slate-200'
+          activeTab === 'devices' ? 'text-blue-400 font-bold' : 'text-slate-400 active:text-slate-200'
         ]"
       >
         <span class="text-lg">🧩</span>
@@ -49,13 +49,27 @@
         @click="activeTab = 'mission'" 
         :class="[
           'flex flex-col items-center space-y-1 transition text-xs font-medium',
-          activeTab === 'mission' ? 'text-blue-400 font-bold' : 'text-slate-400 hover:text-slate-200'
+          activeTab === 'mission' ? 'text-blue-400 font-bold' : 'text-slate-400 active:text-slate-200'
         ]"
       >
         <span class="text-lg">🗣️</span>
         <span>任务指挥</span>
       </button>
     </nav>
+
+    <!-- Environment Settings Modal -->
+    <EnvSettingsModal 
+      v-if="swarmState.showEnvSettings" 
+      @close="swarmState.showEnvSettings = false" 
+    />
+
+    <!-- FPV Live Video Modal -->
+    <FpvVideoModal 
+      v-if="swarmState.showFpvModal" 
+      :device-id="swarmState.fpvDeviceId" 
+      @close="closeFpvModal"
+      @open-teleop="openDeviceDetailFromFpv"
+    />
 
     <!-- Fullscreen Emergency Stop Modal -->
     <EStopModal />
@@ -74,14 +88,26 @@ import HeaderBar from './components/HeaderBar.vue';
 import SpatialCanvas from './components/SpatialCanvas.vue';
 import DeviceMesh from './components/DeviceMesh.vue';
 import MissionCommander from './components/MissionCommander.vue';
+import EnvSettingsModal from './components/EnvSettingsModal.vue';
+import FpvVideoModal from './components/FpvVideoModal.vue';
 import EStopModal from './components/EStopModal.vue';
 import DeviceDetailModal from './components/DeviceDetailModal.vue';
-import { startTelemetryPolling, triggerEmergencyStop } from './services/telemetryService';
+import { 
+  swarmState, 
+  startTelemetryPolling, 
+  triggerEmergencyStop, 
+  closeFpvModal 
+} from './services/telemetryService';
 
 const activeTab = ref<'map' | 'devices' | 'mission'>('map');
 const selectedDeviceId = ref<string | null>(null);
 
 function openDeviceDetail(id: string) {
+  selectedDeviceId.value = id;
+}
+
+function openDeviceDetailFromFpv(id: string) {
+  closeFpvModal();
   selectedDeviceId.value = id;
 }
 
