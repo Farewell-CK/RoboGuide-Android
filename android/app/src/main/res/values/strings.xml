@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">DEAIOS Hub</string>
+    <string name="title_activity_main">DEAIOS Hub</string>
+    <string name="package_name">com.syswonder.roboguide.hub</string>
+    <string name="custom_url_scheme">com.syswonder.roboguide.hub</string>
+</resources>
