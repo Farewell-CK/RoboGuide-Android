@@ -392,7 +392,7 @@ function drawGridAndRooms(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasEleme
 function drawDeviceTrails(ctx: CanvasRenderingContext2D) {
   ctx.save();
   for (const d of swarmState.devices) {
-    if (!d.trajectory || d.trajectory.length < 2) continue;
+    if (!d.trajectory || d.trajectory.length < 2 || !d.pose || d.pose.x === undefined) continue;
 
     ctx.beginPath();
     const first = worldToScreen(d.trajectory[0].x, d.trajectory[0].y);
@@ -467,6 +467,7 @@ function drawTargetGoal(ctx: CanvasRenderingContext2D) {
 
 function drawDevices(ctx: CanvasRenderingContext2D) {
   for (const d of swarmState.devices) {
+    if (!d.pose || d.pose.x === undefined) continue;
     const s = worldToScreen(d.pose.x, d.pose.y);
     const isSelected = d.id === swarmState.selectedDeviceId;
 

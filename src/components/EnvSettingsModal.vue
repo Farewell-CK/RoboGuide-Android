@@ -9,7 +9,7 @@
           </div>
           <div>
             <h3 class="text-base font-bold text-white tracking-wide">环境与集群配置中心</h3>
-            <p class="text-xs text-slate-400 font-mono">Environment & Fleet Ingress Switcher</p>
+            <p class="text-xs text-slate-400 font-mono">RoboGuide Node & Controller Setup</p>
           </div>
         </div>
         <button 
@@ -24,7 +24,7 @@
       <div class="space-y-2.5">
         <div class="text-xs font-semibold text-slate-300 flex items-center justify-between">
           <span>选择当前集群模式:</span>
-          <span class="text-[10px] text-blue-400 font-mono">无需重编 APK</span>
+          <span class="text-[10px] text-blue-400 font-mono">严格区分 REAL / DEMO</span>
         </div>
 
         <div class="grid grid-cols-1 gap-2">
@@ -40,10 +40,8 @@
             ]"
           >
             <div :class="[
-              'w-6 h-6 rounded-md flex items-center justify-center text-xs font-bold mt-0.5 shrink-0',
-              key === 'real_swarm' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' :
-              key === 'isaac_sim' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' :
-              key === 'standalone_thor2' ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30' :
+              'w-8 h-6 rounded-md flex items-center justify-center text-xs font-bold mt-0.5 shrink-0',
+              cfg.isSimulated ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' :
               'bg-blue-500/20 text-blue-400 border border-blue-500/30'
             ]">
               {{ cfg.badge }}
@@ -55,34 +53,44 @@
               </div>
               <p class="text-[11px] text-slate-400 mt-0.5 leading-snug">{{ cfg.description }}</p>
               <div class="text-[10px] font-mono text-slate-400 mt-1 truncate">
-                目标: {{ cfg.controllerEndpoint }}
+                HTTP: {{ cfg.controllerEndpoint }}
               </div>
             </div>
           </div>
         </div>
       </div>
 
-      <!-- Custom Endpoint Inputs (if custom or editing) -->
+      <!-- Endpoint & Port Inputs -->
       <div class="bg-slate-800/80 border border-slate-700 rounded-xl p-3 space-y-2.5">
-        <div class="flex items-center justify-between">
-          <label class="text-xs font-semibold text-slate-300">中枢控制平面地址 (Controller API):</label>
+        <div>
+          <label class="text-xs font-semibold text-slate-300">Controller HTTP 地址 (Inventory / Missions):</label>
+          <input 
+            v-model="customEndpoint"
+            type="text" 
+            placeholder="http://127.0.0.1:8080"
+            class="mt-1 w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-blue-500"
+          />
         </div>
-        <input 
-          v-model="customEndpoint"
-          type="text" 
-          placeholder="http://100.84.233.121:8080"
-          class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-blue-500"
-        />
 
-        <div class="flex items-center justify-between pt-1">
-          <label class="text-xs font-semibold text-slate-300">视频/遥测推流地址 (Stream/WebRTC):</label>
+        <div>
+          <label class="text-xs font-semibold text-slate-300">NodeProtocol gRPC 端口 (bidirectional NodeSession):</label>
+          <input 
+            v-model.number="customGrpcPort"
+            type="number" 
+            placeholder="50051"
+            class="mt-1 w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-blue-500"
+          />
         </div>
-        <input 
-          v-model="customStreamUrl"
-          type="text" 
-          placeholder="http://100.84.233.121:8095"
-          class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-blue-500"
-        />
+
+        <div>
+          <label class="text-xs font-semibold text-slate-300">视频流基准地址 (可选):</label>
+          <input 
+            v-model="customStreamUrl"
+            type="text" 
+            placeholder="http://127.0.0.1:8092"
+            class="mt-1 w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-blue-500"
+          />
+        </div>
       </div>
 
       <!-- Action Buttons -->
@@ -97,7 +105,7 @@
           @click="applyAndSave"
           class="flex-1 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 active:from-blue-500 active:to-indigo-500 text-white font-bold text-xs rounded-xl shadow-lg shadow-blue-500/20 transition flex items-center justify-center space-x-1.5"
         >
-          <span>✓ 应用并切换环境</span>
+          <span>✓ 应用并重新连接</span>
         </button>
       </div>
     </div>
@@ -113,10 +121,11 @@ const emit = defineEmits(['close']);
 
 const selectedProfile = ref<EnvProfileType>(swarmState.currentProfile);
 const customEndpoint = ref(swarmState.controllerEndpoint);
+const customGrpcPort = ref(swarmState.grpcPort || 50051);
 const customStreamUrl = ref(swarmState.videoStreamBaseUrl);
 
 function applyAndSave() {
-  switchEnvironment(selectedProfile.value, customEndpoint.value);
+  switchEnvironment(selectedProfile.value, customEndpoint.value, customStreamUrl.value, customGrpcPort.value);
   emit('close');
 }
 </script>

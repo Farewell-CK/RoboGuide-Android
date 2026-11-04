@@ -1,333 +1,396 @@
 <template>
   <div class="p-4 space-y-4 pb-24 overflow-y-auto h-full select-none">
-    <!-- Natural Language Command Box -->
-    <div class="bg-slate-900/90 border border-slate-800 rounded-xl p-4 shadow-lg">
-      <div class="flex items-center justify-between mb-2">
-        <h2 class="text-xs font-bold text-slate-300 flex items-center space-x-1.5">
-          <span>✨</span>
-          <span>集群自然语言任务下发</span>
-        </h2>
-        <span class="text-[10px] text-blue-400 font-mono">RoboGuide DAG 编译器</span>
-      </div>
+    
+    <!-- REAL MODE VIEW -->
+    <template v-if="swarmState.modeType === 'REAL'">
+      <!-- Phone Node Card -->
+      <div class="bg-slate-900/90 border border-slate-800 rounded-xl p-4 shadow-lg space-y-3">
+        <div class="flex items-center justify-between pb-2 border-b border-slate-800">
+          <div class="flex items-center space-x-2">
+            <span class="text-base">📱</span>
+            <span class="font-bold text-xs text-white">Android Phone Node (正式节点)</span>
+          </div>
+          <span 
+            :class="[
+              'text-[10px] font-mono px-2 py-0.5 rounded font-bold border',
+              swarmState.nodeStatus.connected 
+                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' 
+                : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+            ]"
+          >
+            {{ swarmState.nodeStatus.state }}
+          </span>
+        </div>
 
-      <div class="relative">
-        <textarea 
-          v-model="promptInput" 
-          placeholder="例如：小狗领航导览至 302 会议室，协同小车在后方伴随跟随..." 
-          class="w-full bg-slate-950/80 border border-slate-700/80 rounded-lg p-3 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 min-h-[75px] resize-none"
-        ></textarea>
-      </div>
-
-      <div class="mt-3 flex items-center justify-between">
-        <!-- Hold-to-Talk Voice Button -->
-        <button 
-          @mousedown="startVoice"
-          @mouseup="stopVoice"
-          @touchstart="startVoice"
-          @touchend="stopVoice"
-          :class="[
-            'px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center space-x-2 transition',
-            isRecording 
-              ? 'bg-red-500 text-white animate-pulse shadow-md shadow-red-500/40' 
-              : 'bg-slate-800 text-slate-300 border border-slate-700 active:bg-slate-700'
-          ]"
-        >
-          <span>{{ isRecording ? '🔴 正在录音中...' : '🎙️ 按住说话' }}</span>
-        </button>
-
-        <!-- Submit Button -->
-        <button 
-          @click="submitPrompt(promptInput)" 
-          :disabled="!promptInput.trim()"
-          class="px-4 py-2 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-500 active:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white transition shadow-sm shadow-blue-500/30 flex items-center space-x-1"
-        >
-          <span>派发任务</span>
-          <span>➔</span>
-        </button>
-      </div>
-    </div>
-
-    <!-- RoboGuide Human-in-the-Loop (HITL) Clarification Dialogue Bubble -->
-    <div 
-      v-if="swarmState.activeClarification" 
-      class="bg-amber-950/40 border border-amber-500/50 rounded-xl p-4 shadow-xl animate-fade-in space-y-2.5"
-    >
-      <div class="flex items-center space-x-2">
-        <span class="text-lg">💬</span>
-        <div class="flex-1">
-          <div class="flex items-center justify-between">
-            <h4 class="text-xs font-bold text-amber-300">RoboGuide 交互澄清 (open_question)</h4>
-            <span class="text-[9px] bg-amber-500/20 text-amber-400 font-mono px-1.5 py-0.5 rounded border border-amber-500/30">
-              BLOCKING UNCERTAINTY
+        <div class="grid grid-cols-2 gap-2 text-[11px] font-mono">
+          <div class="bg-slate-950/60 p-2 rounded border border-slate-800/80">
+            <span class="text-slate-400 block text-[10px]">持久节点 ID (Node ID):</span>
+            <span class="text-slate-200 truncate block" :title="swarmState.phoneNodeId">
+              {{ swarmState.phoneNodeId || '未初始化' }}
             </span>
           </div>
-          <p class="text-xs text-slate-200 mt-1 font-medium">
-            {{ swarmState.activeClarification.question }}
+
+          <div class="bg-slate-950/60 p-2 rounded border border-slate-800/80">
+            <span class="text-slate-400 block text-[10px]">租约会话 (Session ID):</span>
+            <span class="text-slate-200 truncate block">
+              {{ swarmState.nodeStatus.sessionId || '无活跃 Session' }}
+            </span>
+          </div>
+
+          <div class="bg-slate-950/60 p-2 rounded border border-slate-800/80">
+            <span class="text-slate-400 block text-[10px]">心跳租约 (Lease / HBs):</span>
+            <span class="text-emerald-400 font-bold block">
+              {{ swarmState.nodeStatus.heartbeatCount }} 次心跳 (seq ok)
+            </span>
+          </div>
+
+          <div class="bg-slate-950/60 p-2 rounded border border-slate-800/80">
+            <span class="text-slate-400 block text-[10px]">gRPC 目标端点:</span>
+            <span class="text-blue-400 block truncate">
+              {{ swarmState.nodeStatus.endpoint || '127.0.0.1:50051' }}
+            </span>
+          </div>
+        </div>
+
+        <!-- Camera Permission & Sensor Tools -->
+        <div class="pt-1 flex items-center justify-between text-xs">
+          <div class="flex items-center space-x-1.5">
+            <span class="text-slate-400">相机权限:</span>
+            <span :class="[swarmState.nodeStatus.hasCameraPermission ? 'text-emerald-400 font-bold' : 'text-amber-400']">
+              {{ swarmState.nodeStatus.hasCameraPermission ? '✓ 已授权' : '⚠️ 未授权' }}
+            </span>
+          </div>
+
+          <div class="flex items-center space-x-2">
+            <button 
+              v-if="!swarmState.nodeStatus.hasCameraPermission"
+              @click="requestCamera"
+              class="px-2.5 py-1 bg-amber-500/20 active:bg-amber-500 border border-amber-500/40 text-amber-300 font-bold text-[11px] rounded"
+            >
+              申请相机权限
+            </button>
+            <button 
+              @click="testLocalCapture"
+              :disabled="isCapturing"
+              class="px-2.5 py-1 bg-blue-600/30 active:bg-blue-600 border border-blue-500/40 text-blue-300 font-bold text-[11px] rounded flex items-center space-x-1"
+            >
+              <span>{{ isCapturing ? '采图中...' : '📸 验证采图' }}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Real Missions Dispatch Card -->
+      <div class="bg-slate-900/90 border border-slate-800 rounded-xl p-4 shadow-lg space-y-3">
+        <div class="flex items-center justify-between">
+          <h2 class="text-xs font-bold text-slate-300 flex items-center space-x-1.5">
+            <span>🚀</span>
+            <span>RoboGuide 任务闭环触发器</span>
+          </h2>
+          <span class="text-[10px] text-emerald-400 font-mono">Formal Mission Dispatch</span>
+        </div>
+
+        <p class="text-[11px] text-slate-400 leading-relaxed">
+          由手机经由 HTTP API 向 Controller 提交 Mission Plan，由调度器完成能力匹配、资源绑定并下发真实 gRPC Execute 指令：
+        </p>
+
+        <div class="grid grid-cols-2 gap-2 pt-1">
+          <button 
+            @click="dispatchPingMission"
+            :disabled="isSubmittingMission"
+            class="p-3 bg-slate-800/80 hover:bg-slate-800 active:bg-blue-600 border border-slate-700 active:border-blue-400 rounded-xl text-left transition group shadow disabled:opacity-40"
+          >
+            <div class="text-base mb-1">📡</div>
+            <div class="font-bold text-xs text-slate-200 group-active:text-white">1. 发起真实 Ping 任务</div>
+            <div class="text-[10px] text-slate-400 mt-0.5 font-mono">system.ping@v1</div>
+          </button>
+
+          <button 
+            @click="dispatchAcquireMission"
+            :disabled="isSubmittingMission"
+            class="p-3 bg-slate-800/80 hover:bg-slate-800 active:bg-blue-600 border border-slate-700 active:border-blue-400 rounded-xl text-left transition group shadow disabled:opacity-40"
+          >
+            <div class="text-base mb-1">📷</div>
+            <div class="font-bold text-xs text-slate-200 group-active:text-white">2. 发起真实采图任务</div>
+            <div class="text-[10px] text-slate-400 mt-0.5 font-mono">observation.acquire@v1</div>
+          </button>
+        </div>
+
+        <div v-if="submissionFeedback" class="p-2.5 rounded-lg bg-slate-950/80 border border-slate-800 font-mono text-[11px]">
+          <div :class="[submissionFeedback.success ? 'text-emerald-400 font-bold' : 'text-red-400 font-bold']">
+            {{ submissionFeedback.success ? '✓ 任务已成功提交' : '✕ 提交失败' }}
+          </div>
+          <p class="text-slate-300 mt-1 break-all text-[10px]">
+            {{ submissionFeedback.message }}
           </p>
         </div>
       </div>
 
-      <!-- Clarification Clickable Options Chips -->
-      <div class="flex flex-wrap gap-2 pt-1">
-        <button
-          v-for="opt in swarmState.activeClarification.options"
-          :key="opt"
-          @click="chooseClarification(opt)"
-          class="px-3 py-1.5 bg-amber-500/20 active:bg-amber-500 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 text-xs font-bold rounded-lg transition active:scale-95 shadow-sm"
-        >
-          {{ opt }}
-        </button>
-      </div>
-    </div>
-
-    <!-- Quick Action Presets -->
-    <div>
-      <div class="flex items-center justify-between mb-2">
-        <h3 class="text-xs font-bold text-slate-400">⚡ 快速多机协同预设</h3>
-        <span class="text-[10px] text-slate-500 font-mono">
-          {{ swarmState.currentProfile === 'isaac_sim' ? '仿真环境方案' : '实机集群方案' }}
-        </span>
-      </div>
-      <div class="grid grid-cols-2 gap-2">
-        <button 
-          v-for="preset in presets" 
-          :key="preset.title"
-          @click="submitPrompt(preset.prompt)"
-          class="bg-slate-900/90 border border-slate-800 p-3 rounded-lg text-left active:border-blue-500 transition group shadow"
-        >
-          <div class="text-lg mb-1">{{ preset.icon }}</div>
-          <div class="font-bold text-xs text-slate-200 group-active:text-blue-400">{{ preset.title }}</div>
-          <div class="text-[10px] text-slate-400 mt-0.5 line-clamp-1">{{ preset.desc }}</div>
-        </button>
-      </div>
-    </div>
-
-    <!-- Active Mission DAG Stepper Card -->
-    <div v-if="swarmState.activeMission" class="bg-slate-900/90 border border-blue-500/30 rounded-xl p-4 shadow-lg relative overflow-hidden">
-      <div class="flex items-center justify-between pb-2 border-b border-slate-800">
-        <div>
-          <div class="flex items-center space-x-2">
-            <span class="w-2 h-2 rounded-full bg-blue-500 animate-ping"></span>
-            <span class="font-bold text-xs text-blue-400">多机协同执行 Task DAG</span>
+      <!-- Execution Journal Table -->
+      <div class="bg-slate-900/90 border border-slate-800 rounded-xl p-4 shadow-lg space-y-3">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center space-x-1.5">
+            <span class="text-base">📋</span>
+            <span class="text-xs font-bold text-slate-300">SQLite 执行日志与产物对账</span>
           </div>
-          <p class="text-xs text-slate-200 font-medium mt-1">"{{ swarmState.activeMission.title }}"</p>
+          <button 
+            @click="refreshJournal"
+            class="text-[10px] font-mono text-blue-400 hover:text-blue-300 active:underline flex items-center space-x-1"
+          >
+            <span>刷新对账</span>
+            <span>⟳</span>
+          </button>
         </div>
-        <span class="text-[10px] font-mono bg-blue-500/20 text-blue-300 px-2 py-0.5 rounded border border-blue-500/30">
-          {{ swarmState.activeMission.status }}
-        </span>
-      </div>
 
-      <!-- Task DAG Steps -->
-      <div class="mt-3 space-y-2.5">
-        <div 
-          v-for="(task, idx) in swarmState.activeMission.tasks" 
-          :key="task.id"
-          class="bg-slate-950/60 border border-slate-800 rounded-lg p-2.5 text-xs shadow-inner"
-        >
-          <div class="flex items-center justify-between">
-            <div class="flex items-center space-x-2">
-              <span class="w-5 h-5 rounded-full bg-slate-800 flex items-center justify-center font-mono text-[10px] text-slate-300">
-                {{ idx + 1 }}
+        <div v-if="swarmState.journalRecords.length === 0" class="text-center py-6 text-slate-500 text-xs font-mono">
+          暂无本地任务执行记录 (等待 Controller Execute 指令)
+        </div>
+
+        <div v-else class="space-y-2">
+          <div 
+            v-for="rec in swarmState.journalRecords" 
+            :key="rec.execution_id"
+            class="p-2.5 rounded-lg bg-slate-950/60 border border-slate-800 text-xs font-mono space-y-1"
+          >
+            <div class="flex items-center justify-between">
+              <span class="font-bold text-slate-200 text-[11px] truncate max-w-[180px]">
+                {{ rec.operation || 'unknown' }}
               </span>
-              <span class="font-medium text-slate-200">{{ task.title }}</span>
+              <span 
+                :class="[
+                  'text-[10px] font-bold px-1.5 py-0.2 rounded uppercase',
+                  rec.phase === 'COMPLETED' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' :
+                  rec.phase === 'FAILED' ? 'bg-red-500/20 text-red-400 border border-red-500/30' :
+                  rec.phase === 'CANCELLED' ? 'bg-slate-700 text-slate-400 border border-slate-600' :
+                  'bg-blue-500/20 text-blue-400 border border-blue-500/30 animate-pulse'
+                ]"
+              >
+                {{ rec.phase }}
+              </span>
             </div>
-            <span :class="['text-[10px] font-mono px-1.5 py-0.5 rounded', getTaskStatusClass(task.status)]">
-              {{ task.status.toUpperCase() }}
-            </span>
-          </div>
 
-          <div class="mt-2 flex items-center justify-between text-[10px] text-slate-400">
-            <span>执行者: {{ task.assignedDeviceName }}</span>
-            <span class="font-mono text-slate-500">{{ task.requiredCapability }}</span>
-          </div>
+            <div class="text-[10px] text-slate-400 flex items-center justify-between">
+              <span class="truncate max-w-[200px]">ID: {{ rec.execution_id }}</span>
+              <span>{{ formatTime(rec.created_at_ms) }}</span>
+            </div>
 
-          <!-- Progress Bar -->
-          <div class="w-full bg-slate-800 rounded-full h-1 mt-2 overflow-hidden">
-            <div 
-              class="bg-blue-500 h-1 rounded-full transition-all duration-300"
-              :style="{ width: `${task.progressPercent}%` }"
-            ></div>
+            <!-- Artifact SHA-256 Digest if present -->
+            <div v-if="rec.artifact_digest" class="mt-1 pt-1 border-t border-slate-800 text-[10px] text-sky-400">
+              <span class="text-slate-400">SHA256: </span>
+              <span class="break-all">{{ rec.artifact_digest }}</span>
+            </div>
+
+            <div v-if="rec.reason" class="text-[10px] text-slate-400 break-all">
+              <span class="text-slate-400">回执: </span>{{ rec.reason }}
+            </div>
           </div>
         </div>
       </div>
-    </div>
+    </template>
+
+
+    <!-- DEMO MODE VIEW -->
+    <template v-else>
+      <div class="bg-amber-950/30 border border-amber-500/40 rounded-xl p-3 flex items-center space-x-2.5">
+        <span class="text-xl">⚠️</span>
+        <div>
+          <h3 class="text-xs font-bold text-amber-300">DEMO 离线仿真演示模式</h3>
+          <p class="text-[11px] text-slate-300">当前处于数字孪生展示环境，状态与进度为仿真模拟生成。</p>
+        </div>
+      </div>
+
+      <!-- Natural Language Command Box (Demo) -->
+      <div class="bg-slate-900/90 border border-slate-800 rounded-xl p-4 shadow-lg space-y-3">
+        <h2 class="text-xs font-bold text-slate-300">✨ 离线仿真自然语言派发</h2>
+        <textarea 
+          v-model="promptInput" 
+          placeholder="例如：双足狗协同巡检，对货架 A 区进行点云重构..." 
+          class="w-full bg-slate-950/80 border border-slate-700/80 rounded-lg p-3 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 min-h-[60px] resize-none"
+        ></textarea>
+        <button 
+          @click="submitDemoPrompt"
+          class="w-full py-2 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white transition shadow"
+        >
+          派发仿真任务演示
+        </button>
+      </div>
+
+      <!-- Active Demo Mission DAG -->
+      <div v-if="swarmState.activeMission" class="bg-slate-900/90 border border-slate-800 rounded-xl p-4 space-y-2">
+        <div class="flex items-center justify-between pb-1 border-b border-slate-800">
+          <span class="text-xs font-bold text-slate-200">仿真任务: {{ swarmState.activeMission.title }}</span>
+          <span class="text-[10px] font-mono text-amber-400">[DEMO DAG]</span>
+        </div>
+        <div v-for="t in swarmState.activeMission.tasks" :key="t.id" class="p-2 rounded bg-slate-950/50 text-xs">
+          <div class="flex justify-between text-slate-300">
+            <span>{{ t.title }}</span>
+            <span class="text-emerald-400 font-mono">{{ t.status }}</span>
+          </div>
+        </div>
+      </div>
+    </template>
+
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue';
-import { swarmState, answerClarification } from '../services/telemetryService';
-import type { ActiveMission } from '../types/swarm';
+import { ref } from 'vue';
+import { swarmState, refreshJournalRecords, refreshNodeStatus } from '../services/telemetryService';
+import { PhoneNode } from '../services/phoneNodePlugin';
 
 const promptInput = ref('');
-const isRecording = ref(false);
+const isCapturing = ref(false);
+const isSubmittingMission = ref(false);
+const submissionFeedback = ref<{ success: boolean; message: string } | null>(null);
 
-const presets = computed(() => {
-  if (swarmState.currentProfile === 'isaac_sim') {
-    return [
-      {
-        icon: '🏭',
-        title: '双足狗协同巡检 (Isaac)',
-        desc: '领航犬 Alpha 探路，Beta 犬侧翼伴随扫描货架',
-        prompt: '在 Isaac 园区中启动双足机器狗协同巡检，对立体货架 A 区进行点云重构。'
-      },
-      {
-        icon: '📦',
-        title: '园区异构搬运 (Isaac)',
-        desc: '鹰眼监控粗筛，小狗引导，叉车搬运托盘',
-        prompt: '鹰眼监控检测到货架托盘就位，派遣仿真小狗确认路径，通知电动叉车前往搬运。'
-      },
-      {
-        icon: '🗺️',
-        title: '全景子图闭环拼图',
-        desc: '双机分别建图并推送到 CAS 空间仓库',
-        prompt: '触发双机局部子图共享，执行位姿图优化闭环拼板。'
-      },
-      {
-        icon: '🚨',
-        title: '全员避障待命',
-        desc: '广播进入待命站立刚性锁定',
-        prompt: '检测到前方临时施工，所有仿真设备就近停靠在通道两侧。'
-      }
-    ];
+function formatTime(ms: number) {
+  if (!ms) return '';
+  return new Date(ms).toLocaleTimeString();
+}
+
+async function refreshJournal() {
+  await refreshNodeStatus();
+  await refreshJournalRecords();
+}
+
+async function requestCamera() {
+  try {
+    const res = await PhoneNode.requestCameraPermission();
+    await refreshNodeStatus();
+  } catch (e: any) {
+    alert('申请相机权限失败: ' + e?.message);
   }
+}
 
-  return [
-    {
-      icon: '🗺️',
-      title: '分布式地图共享接力',
-      desc: '双狗实地建图，发布至 CAS 仓库并交叉验证',
-      prompt: '执行分布式地图共享：1号狗探路建图并发布，2号狗导入验证不可变地图。'
-    },
-    {
-      icon: '🚶',
-      title: '双机伴随导览',
-      desc: '狗在人身前 1.5m 领航导引至 302 会议室',
-      prompt: '领航狗在持机人身前 1.5 米处伴随导览，目标为 302 会议室。'
-    },
-    {
-      icon: '📦',
-      title: '异构协同取件',
-      desc: '高位相机粗筛 ➔ 狗探路 ➔ AGV 搬运货物',
-      prompt: '走廊监控识别障碍，小狗前出确认地面通行度，AGV 运输重载货物。'
-    },
-    {
-      icon: '🔋',
-      title: '一键低电量轮替',
-      desc: '低电量节点自动交接上下文并前往充电桩',
-      prompt: '检查全集群电量，若小于 30% 则将当前任务角色移交给备选节点。'
+async function testLocalCapture() {
+  isCapturing.value = true;
+  try {
+    const res = await PhoneNode.manualCapture({ condition: 'manual-optical-verification' });
+    if (res.success) {
+      alert(`采图成功!\nSHA-256: ${res.digest}\n文件路径: ${res.filePath}\n文件大小: ${res.sizeBytes} 字节`);
+    } else {
+      alert(`采图失败: ${res.error}`);
     }
-  ];
-});
-
-function startVoice() {
-  isRecording.value = true;
-}
-
-function stopVoice() {
-  if (isRecording.value) {
-    isRecording.value = false;
-    promptInput.value = '领航狗在身前伴随导览至会议室，协同设备在后方随行。';
+    await refreshNodeStatus();
+    await refreshJournalRecords();
+  } catch (e: any) {
+    alert('采图异常: ' + e?.message);
+  } finally {
+    isCapturing.value = false;
   }
 }
 
-function chooseClarification(opt: string) {
-  if (swarmState.activeClarification) {
-    answerClarification(swarmState.activeClarification.id, opt);
-  }
+async function dispatchPingMission() {
+  await submitMissionPlan('system.ping@v1', {}, 'Validate formal system ping on phone node');
 }
 
-function submitPrompt(text: string) {
-  if (!text.trim()) return;
+async function dispatchAcquireMission() {
+  await submitMissionPlan('observation.acquire@v1', { expected: 'semantic site observation' }, 'Acquire photographic evidence via mobile camera');
+}
 
-  const isSim = swarmState.currentProfile === 'isaac_sim';
+async function submitMissionPlan(capabilityContract: string, parameters: Record<string, any>, objective: string) {
+  isSubmittingMission.value = true;
+  submissionFeedback.value = null;
 
-  // Trigger clarification for demonstration of RoboGuide HITL
-  swarmState.activeClarification = {
-    id: 'clarify-' + Date.now(),
-    question: isSim 
-      ? '检测到园区有两个待巡检货架（A区与B区），请确认首选编队方向：' 
-      : '检测到 302 会议室有东门与西门两个入口，请指定领航接入点：',
-    options: isSim 
-      ? ['优先立体货架 A 区 (Alpha领航)', '优先自动分拣 B 区 (Beta领航)'] 
-      : ['东侧主入口通道 (平地宽敞)', '西侧连廊通道 (需过减速带)']
+  const missionId = `mission-phone-${Date.now()}`;
+  const taskId = `task-${capabilityContract.replace(/[@.]/g, '-')}-${Date.now()}`;
+  const [qualifiedName, version] = capabilityContract.split('@');
+  const [namespace, name] = qualifiedName.split('.');
+
+  const plan = {
+    schema_version: 'roboguide.mission-plan/v0.3',
+    mission: {
+      id: missionId,
+      objective: objective
+    },
+    contexts: [{
+      id: 'phone-context',
+      roles: [{ id: 'phone-role', actor: 'phone-actor' }],
+      relations: []
+    }],
+    tasks: [{
+      id: taskId,
+      description: objective,
+      context_id: 'phone-context',
+      depends_on: [],
+      roles: [{
+        id: 'phone-exec-role',
+        actor: 'phone-actor',
+        capability: capabilityContract.startsWith('observation') ? 'sensing' : 'compute',
+        contract: {
+          namespace: namespace,
+          name: name,
+          version: version
+        },
+        resource_kind: capabilityContract.startsWith('observation') ? 'sensor' : 'compute',
+        context_role: 'phone-role',
+        resource_scope: 'task',
+        execution: {
+          capability_contract: {
+            namespace: namespace,
+            name: name,
+            version: version
+          },
+          parameters: parameters
+        }
+      }]
+    }]
   };
 
-  const newMission: ActiveMission = {
-    id: 'mission-' + Date.now(),
-    title: text.length > 25 ? text.slice(0, 25) + '...' : text,
-    rawPrompt: text,
+  try {
+    const url = `${swarmState.controllerEndpoint.replace(/\/$/, '')}/v1/missions`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(plan)
+    });
+
+    const bodyText = await res.text();
+    if (res.ok) {
+      submissionFeedback.value = {
+        success: true,
+        message: `Mission ${missionId} 提交成功: ${bodyText}`
+      };
+      // Poll journal for execution receipt
+      setTimeout(refreshJournal, 500);
+      setTimeout(refreshJournal, 1500);
+      setTimeout(refreshJournal, 3000);
+    } else {
+      submissionFeedback.value = {
+        success: false,
+        message: `Controller 返回 HTTP ${res.status}: ${bodyText}`
+      };
+    }
+  } catch (e: any) {
+    submissionFeedback.value = {
+      success: false,
+      message: `网络请求失败: ${e.message} (请检查 Controller 地址是否可达)`
+    };
+  } finally {
+    isSubmittingMission.value = false;
+  }
+}
+
+function submitDemoPrompt() {
+  if (!promptInput.value) return;
+  swarmState.activeMission = {
+    id: 'demo-mission-' + Date.now(),
+    title: promptInput.value,
+    rawPrompt: promptInput.value,
     createdAt: new Date().toLocaleTimeString(),
-    status: 'MATCHING',
-    tasks: isSim ? [
+    status: 'EXECUTING',
+    tasks: [
       {
-        id: 't-1',
-        title: '解析意图与多机能力匹配',
-        assignedDeviceId: 'controller',
-        assignedDeviceName: 'RoboGuide 中枢',
-        requiredCapability: 'compute.dag.compiler@v1',
-        status: 'completed',
-        progressPercent: 100
-      },
-      {
-        id: 't-2',
-        title: '领航犬 Alpha 强化学习步态巡检',
+        id: 'demo-t1',
+        title: '双足狗强化学习巡检',
         assignedDeviceId: 'sim-dog-alpha',
         assignedDeviceName: '仿真领航犬 (Alpha)',
         requiredCapability: 'mobility.legged.terrain@v1',
-        status: 'pending',
-        progressPercent: 0
-      },
-      {
-        id: 't-3',
-        title: '协同犬 Beta 伴随扫描与点云融合',
-        assignedDeviceId: 'sim-dog-beta',
-        assignedDeviceName: '仿真协同犬 (Beta)',
-        requiredCapability: 'spatial.map.build@v0',
-        status: 'pending',
-        progressPercent: 0
-      }
-    ] : [
-      {
-        id: 't-1',
-        title: '能力契约与空间时序联合调度',
-        assignedDeviceId: 'controller',
-        assignedDeviceName: 'RoboGuide 控制平面',
-        requiredCapability: 'compute.dag.compiler@v1',
-        status: 'completed',
-        progressPercent: 100
-      },
-      {
-        id: 't-2',
-        title: '2号狗领航前出导航',
-        assignedDeviceId: 'dog-thor-2',
-        assignedDeviceName: '2号狗 (Thor 2)',
-        requiredCapability: 'mobility.legged.terrain@v1',
-        status: 'pending',
-        progressPercent: 0
-      },
-      {
-        id: 't-3',
-        title: 'AGV 平地巡航伴随重载物料',
-        assignedDeviceId: 'agv-chassis-01',
-        assignedDeviceName: '轮式重载车 (AGV-01)',
-        requiredCapability: 'transport.payload.heavy@v1',
-        status: 'pending',
-        progressPercent: 0
+        status: 'running',
+        progressPercent: 60
       }
     ]
   };
-
-  swarmState.activeMission = newMission;
   promptInput.value = '';
-}
-
-function getTaskStatusClass(status: string) {
-  switch (status) {
-    case 'completed': return 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30';
-    case 'running': return 'bg-blue-500/20 text-blue-400 border border-blue-500/30 animate-pulse';
-    case 'failed': return 'bg-red-500/20 text-red-400 border border-red-500/30';
-    default: return 'bg-slate-800 text-slate-500 border border-slate-700';
-  }
 }
 </script>
