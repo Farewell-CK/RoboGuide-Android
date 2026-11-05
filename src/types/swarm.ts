@@ -78,9 +78,11 @@ export interface ClusterSecurityConfig {
   operatorHttpsUrl: string;
   artifactHttpsUrl: string;
   tlsServerName?: string;
+  operatorTlsServerName?: string;
   useMtls: boolean;
 
   serverCaCertPem?: string;
+  operatorCaCertPem?: string;
   nodeCertPem?: string;
   nodeKeyPem?: string;
   operatorCertPem?: string;

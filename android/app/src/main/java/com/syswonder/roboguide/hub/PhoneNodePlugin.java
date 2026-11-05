@@ -131,6 +131,18 @@ public class PhoneNodePlugin extends Plugin {
         call.resolve(ret);
     }
 
+    private boolean isAllowedOperatorPath(String path) {
+        if (path == null) return false;
+        String clean = path.split("\\?")[0].trim();
+        if (clean.contains("..") || clean.contains("//")) return false;
+        return clean.equals("/v1/inventory") ||
+                clean.equals("/v1/missions") ||
+                clean.startsWith("/v1/missions/") ||
+                clean.equals("/v1/health") ||
+                clean.startsWith("/v1/clusters/") ||
+                clean.startsWith("/v1/artifacts/");
+    }
+
     @PluginMethod
     public void saveConfig(PluginCall call) {
         JSObject configObj = call.getObject("config", null);
@@ -141,6 +153,21 @@ public class PhoneNodePlugin extends Plugin {
         try {
             JSONObject json = new JSONObject(configObj.toString());
             PhoneNodeConfig config = PhoneNodeConfig.fromJson(json);
+
+            // Key-certificate matching verification
+            if (!config.nodeCertPem.isEmpty() && !config.nodeKeyPem.isEmpty()) {
+                if (!PhoneNodeSecurityHelper.verifyKeyMatchesCertificate(config.nodeCertPem, config.nodeKeyPem)) {
+                    call.reject("Node certificate does not match locally stored node private key");
+                    return;
+                }
+            }
+            if (!config.operatorCertPem.isEmpty() && !config.operatorKeyPem.isEmpty()) {
+                if (!PhoneNodeSecurityHelper.verifyKeyMatchesCertificate(config.operatorCertPem, config.operatorKeyPem)) {
+                    call.reject("Operator certificate does not match locally stored operator private key");
+                    return;
+                }
+            }
+
             config.save(getContext());
 
             JSObject ret = new JSObject(config.toJson(false).toString());
@@ -182,6 +209,7 @@ public class PhoneNodePlugin extends Plugin {
             ret.put("nodeId", nodeId);
             ret.put("publicKeyPem", pubPem);
             ret.put("algorithm", algorithm);
+            ret.put("hasNodeKey", true);
             call.resolve(ret);
         } catch (Exception e) {
             call.reject("Failed to generate device identity: " + e.getMessage(), e);
@@ -189,10 +217,127 @@ public class PhoneNodePlugin extends Plugin {
     }
 
     @PluginMethod
+    public void importNodeCertificate(PluginCall call) {
+        String certPem = call.getString("certPem", "");
+        if (certPem == null || certPem.trim().isEmpty()) {
+            call.reject("Empty certificate PEM");
+            return;
+        }
+        try {
+            PhoneNodeConfig config = PhoneNodeConfig.load(getContext());
+            if (config.nodeKeyPem == null || config.nodeKeyPem.trim().isEmpty()) {
+                call.reject("Cannot import certificate: no local node private key exists. Generate a device key first.");
+                return;
+            }
+            if (!PhoneNodeSecurityHelper.verifyKeyMatchesCertificate(certPem, config.nodeKeyPem)) {
+                call.reject("Certificate public key does not match local node private key");
+                return;
+            }
+            config.nodeCertPem = certPem;
+            config.save(getContext());
+
+            java.util.List<java.security.cert.X509Certificate> certs = PhoneNodeSecurityHelper.parseCertificates(certPem);
+            String fp = certs.isEmpty() ? "" : PhoneNodeSecurityHelper.computeCertSha256Digest(certs.get(0));
+
+            JSObject ret = new JSObject();
+            ret.put("success", true);
+            ret.put("nodeCertFingerprint", fp);
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject("Failed to import node certificate: " + e.getMessage(), e);
+        }
+    }
+
+    @PluginMethod
+    public void generateOperatorIdentity(PluginCall call) {
+        String algorithm = call.getString("algorithm", "EC");
+        try {
+            KeyPair kp = PhoneNodeSecurityHelper.generateDeviceKeyPair(algorithm);
+            String pubPem = PhoneNodeSecurityHelper.exportPublicKeyToPem(kp.getPublic());
+            String privPem = PhoneNodeSecurityHelper.exportPrivateKeyToPem(kp.getPrivate());
+
+            PhoneNodeConfig config = PhoneNodeConfig.load(getContext());
+            config.operatorKeyPem = privPem;
+            config.save(getContext());
+
+            JSObject ret = new JSObject();
+            ret.put("publicKeyPem", pubPem);
+            ret.put("algorithm", algorithm);
+            ret.put("hasOperatorKey", true);
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject("Failed to generate operator identity: " + e.getMessage(), e);
+        }
+    }
+
+    @PluginMethod
+    public void importOperatorCertificate(PluginCall call) {
+        String certPem = call.getString("certPem", "");
+        if (certPem == null || certPem.trim().isEmpty()) {
+            call.reject("Empty certificate PEM");
+            return;
+        }
+        try {
+            PhoneNodeConfig config = PhoneNodeConfig.load(getContext());
+            if (config.operatorKeyPem == null || config.operatorKeyPem.trim().isEmpty()) {
+                call.reject("Cannot import certificate: no local operator private key exists. Generate or import operator key first.");
+                return;
+            }
+            if (!PhoneNodeSecurityHelper.verifyKeyMatchesCertificate(certPem, config.operatorKeyPem)) {
+                call.reject("Operator certificate public key does not match local operator private key");
+                return;
+            }
+            config.operatorCertPem = certPem;
+            config.save(getContext());
+
+            java.util.List<java.security.cert.X509Certificate> certs = PhoneNodeSecurityHelper.parseCertificates(certPem);
+            String fp = certs.isEmpty() ? "" : PhoneNodeSecurityHelper.computeCertSha256Digest(certs.get(0));
+
+            JSObject ret = new JSObject();
+            ret.put("success", true);
+            ret.put("operatorCertFingerprint", fp);
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject("Failed to import operator certificate: " + e.getMessage(), e);
+        }
+    }
+
+    @PluginMethod
+    public void clearCredentials(PluginCall call) {
+        String target = call.getString("target", "all");
+        PhoneNodeConfig config = PhoneNodeConfig.load(getContext());
+        if ("node".equals(target) || "all".equals(target)) {
+            config.nodeKeyPem = "";
+            config.nodeCertPem = "";
+        }
+        if ("operator".equals(target) || "all".equals(target)) {
+            config.operatorKeyPem = "";
+            config.operatorCertPem = "";
+        }
+        config.save(getContext());
+        if ("all".equals(target)) {
+            PhoneNodeSecurityHelper.clearSecureStorage(getContext());
+        }
+        JSObject ret = new JSObject();
+        ret.put("cleared", target);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
     public void operatorRequest(PluginCall call) {
         String method = call.getString("method", "GET").toUpperCase();
         String path = call.getString("path", "/v1/inventory");
         JSObject bodyObj = call.getObject("body", null);
+
+        if (!"GET".equals(method) && !"POST".equals(method) && !"PUT".equals(method) && !"DELETE".equals(method)) {
+            call.reject("Method not allowed: " + method);
+            return;
+        }
+
+        if (!isAllowedOperatorPath(path)) {
+            call.reject("Forbidden operator request path: " + path);
+            return;
+        }
 
         executor.submit(() -> {
             HttpURLConnection conn = null;
@@ -206,19 +351,25 @@ public class PhoneNodePlugin extends Plugin {
                 URL url = new URL(fullUrl);
                 conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod(method);
-                conn.setConnectTimeout(5000);
-                conn.setReadTimeout(10000);
+                conn.setInstanceFollowRedirects(false);
+                conn.setConnectTimeout(8000);
+                conn.setReadTimeout(15000);
                 conn.setRequestProperty("Accept", "application/json");
 
                 if (conn instanceof HttpsURLConnection && config.useMtls) {
+                    String caCert = (config.operatorCaCertPem != null && !config.operatorCaCertPem.trim().isEmpty())
+                            ? config.operatorCaCertPem
+                            : config.serverCaCertPem;
                     PhoneNodeSecurityHelper.SslBundle bundle = PhoneNodeSecurityHelper.buildSslBundle(
-                            config.serverCaCertPem,
+                            caCert,
                             config.operatorCertPem,
                             config.operatorKeyPem);
                     ((HttpsURLConnection) conn).setSSLSocketFactory(bundle.socketFactory);
-                    if (config.tlsServerName != null && !config.tlsServerName.trim().isEmpty()) {
-                        ((HttpsURLConnection) conn).setHostnameVerifier((hostname, session) -> true);
-                    }
+                    String expectedServer = (config.operatorTlsServerName != null && !config.operatorTlsServerName.trim().isEmpty())
+                            ? config.operatorTlsServerName.trim()
+                            : config.tlsServerName;
+                    ((HttpsURLConnection) conn).setHostnameVerifier(
+                            PhoneNodeSecurityHelper.createStrictHostnameVerifier(expectedServer));
                 }
 
                 if (("POST".equals(method) || "PUT".equals(method)) && bodyObj != null) {
@@ -237,7 +388,13 @@ public class PhoneNodePlugin extends Plugin {
                     ByteArrayOutputStream baos = new ByteArrayOutputStream();
                     byte[] buf = new byte[4096];
                     int n;
+                    int total = 0;
+                    int maxBytes = 10 * 1024 * 1024; // 10MB limit
                     while ((n = is.read(buf)) != -1) {
+                        total += n;
+                        if (total > maxBytes) {
+                            throw new IllegalStateException("Operator response exceeded maximum size limit of 10MB");
+                        }
                         baos.write(buf, 0, n);
                     }
                     respText = baos.toString(StandardCharsets.UTF_8.name());

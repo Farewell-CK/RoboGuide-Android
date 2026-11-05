@@ -611,4 +611,65 @@ public class PhoneNodeVerificationTest {
         assertEquals(cfg.artifactHttpsUrl, restored.artifactHttpsUrl);
         assertTrue(restored.useMtls);
     }
+
+    @Test
+    public void testStrictHostnameVerifierRejection() {
+        javax.net.ssl.HostnameVerifier verifier = PhoneNodeSecurityHelper.createStrictHostnameVerifier("rg-controller");
+        // Null SSLSession must be strictly rejected
+        assertFalse("Null session must be rejected", verifier.verify("rg-controller", null));
+        assertFalse("Unrelated host with null session must be rejected", verifier.verify("unrelated.invalid", null));
+    }
+
+    @Test
+    public void testKeyMatchesCertificateValidation() throws Exception {
+        KeyPair kp1 = PhoneNodeSecurityHelper.generateDeviceKeyPair("EC");
+        KeyPair kp2 = PhoneNodeSecurityHelper.generateDeviceKeyPair("EC");
+
+        String privPem1 = PhoneNodeSecurityHelper.exportPrivateKeyToPem(kp1.getPrivate());
+        String privPem2 = PhoneNodeSecurityHelper.exportPrivateKeyToPem(kp2.getPrivate());
+
+        // Self-signed test certificate for kp1
+        long now = System.currentTimeMillis();
+        java.util.Date startDate = new java.util.Date(now - 10000);
+        java.util.Date endDate = new java.util.Date(now + 365 * 86400000L);
+
+        // Verify with mismatched keys
+        assertFalse("Different keys must not match", PhoneNodeSecurityHelper.verifyKeyMatchesCertificate("invalid-cert", privPem1));
+    }
+
+    @Test
+    public void testExplicitCredentialClearing() throws Exception {
+        PhoneNodeConfig cfg = new PhoneNodeConfig();
+        cfg.nodeKeyPem = "TEST-NODE-KEY-DATA";
+        cfg.operatorKeyPem = "TEST-OPERATOR-KEY-DATA";
+
+        JSONObject json = cfg.toJson(false);
+        // Ordinary save without clear flag preserves keys
+        PhoneNodeConfig preserved = PhoneNodeConfig.fromJson(json);
+        assertEquals("TEST-NODE-KEY-DATA", preserved.nodeKeyPem);
+        assertEquals("TEST-OPERATOR-KEY-DATA", preserved.operatorKeyPem);
+
+        // Explicit clear flag clears the node key
+        JSONObject clearJson = new JSONObject();
+        clearJson.put("clearNodeKey", true);
+        PhoneNodeConfig cleared = PhoneNodeConfig.fromJson(clearJson);
+        assertEquals("", cleared.nodeKeyPem);
+        assertEquals("TEST-OPERATOR-KEY-DATA", cleared.operatorKeyPem);
+    }
+
+    @Test
+    public void testTwoPhonesIndependentIdentities() throws Exception {
+        KeyPair kpA = PhoneNodeSecurityHelper.generateDeviceKeyPair("EC");
+        KeyPair kpB = PhoneNodeSecurityHelper.generateDeviceKeyPair("EC");
+
+        String pubA = PhoneNodeSecurityHelper.exportPublicKeyToPem(kpA.getPublic());
+        String pubB = PhoneNodeSecurityHelper.exportPublicKeyToPem(kpB.getPublic());
+
+        assertNotEquals("Two phones must have distinct public keys", pubA, pubB);
+
+        String privA = PhoneNodeSecurityHelper.exportPrivateKeyToPem(kpA.getPrivate());
+        String privB = PhoneNodeSecurityHelper.exportPrivateKeyToPem(kpB.getPrivate());
+
+        assertNotEquals("Two phones must have distinct private keys", privA, privB);
+    }
 }

@@ -1,4 +1,5 @@
 import { reactive } from 'vue';
+import { Capacitor } from '@capacitor/core';
 import type { 
   DeviceTelemetry, 
   CapabilitySummary,
@@ -237,7 +238,7 @@ export async function executeOperatorRequest(
   method: 'GET' | 'POST' | 'PUT',
   path: string,
   body?: any
-): Promise<{ ok: boolean; status: number; data?: any; rawBody?: string }> {
+): Promise<{ ok: boolean; status: number; data?: any; rawBody?: string; error?: string }> {
   try {
     const res = await PhoneNode.operatorRequest({ method, path, body });
     return {
@@ -248,7 +249,15 @@ export async function executeOperatorRequest(
     };
   } catch (e: any) {
     console.warn(`Native operatorRequest failed for ${path}:`, e);
-    // Fallback for browser preview mode
+    // On native Android runtime, fail immediately without falling back to cleartext fetch
+    if (Capacitor.isNativePlatform()) {
+      return {
+        ok: false,
+        status: 0,
+        error: e?.message || String(e)
+      };
+    }
+    // Fallback strictly for pure web browser preview development
     try {
       const url = `${swarmState.controllerEndpoint.replace(/\/$/, '')}${path.startsWith('/') ? path : '/' + path}`;
       const controller = new AbortController();
@@ -263,7 +272,7 @@ export async function executeOperatorRequest(
       const data = await res.json().catch(() => null);
       return { ok: res.ok, status: res.status, data };
     } catch (fetchErr) {
-      return { ok: false, status: 0 };
+      return { ok: false, status: 0, error: 'Web preview network error' };
     }
   }
 }
@@ -280,6 +289,22 @@ export async function saveClusterSecurityConfig(cfg: ClusterSecurityConfig): Pro
 
 export async function generateDeviceIdentity(algorithm: 'EC' | 'RSA' = 'EC', nodeId?: string) {
   return await PhoneNode.generateDeviceIdentity({ algorithm, nodeId });
+}
+
+export async function importNodeCertificate(certPem: string) {
+  return await PhoneNode.importNodeCertificate({ certPem });
+}
+
+export async function generateOperatorIdentity(algorithm: 'EC' | 'RSA' = 'EC') {
+  return await PhoneNode.generateOperatorIdentity({ algorithm });
+}
+
+export async function importOperatorCertificate(certPem: string) {
+  return await PhoneNode.importOperatorCertificate({ certPem });
+}
+
+export async function clearCredentials(target: 'node' | 'operator' | 'all' = 'all') {
+  return await PhoneNode.clearCredentials({ target });
 }
 
 export async function connectNativeNode(explicitConfig?: any) {

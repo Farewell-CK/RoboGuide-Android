@@ -32,6 +32,9 @@ import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.HttpsURLConnection;
 
 import org.json.JSONObject;
 
@@ -257,11 +260,70 @@ public class PhoneNodeSecurityHelper {
             keyManagers = kmf.getKeyManagers();
         }
 
-        // 3. Initialize SSLContext
-        SSLContext sslContext = SSLContext.getInstance("TLSv1.3");
+        // 3. Initialize SSLContext (supporting TLS 1.2 and TLS 1.3)
+        SSLContext sslContext = SSLContext.getInstance("TLS");
         sslContext.init(keyManagers, trustManagers, new SecureRandom());
 
         return new SslBundle(sslContext, sslContext.getSocketFactory(), x509TrustManager);
+    }
+
+    /**
+     * Strict HostnameVerifier that checks the peer certificate against the expected server name.
+     * Never bypasses hostname checks: rejects null sessions or mismatched certificates.
+     */
+    public static HostnameVerifier createStrictHostnameVerifier(final String expectedServerName) {
+        final HostnameVerifier defaultVerifier = HttpsURLConnection.getDefaultHostnameVerifier();
+        return new HostnameVerifier() {
+            @Override
+            public boolean verify(String hostname, SSLSession session) {
+                if (session == null) {
+                    return false;
+                }
+                if (expectedServerName != null && !expectedServerName.trim().isEmpty()) {
+                    String expected = expectedServerName.trim();
+                    return defaultVerifier.verify(expected, session);
+                }
+                return defaultVerifier.verify(hostname, session);
+            }
+        };
+    }
+
+    /**
+     * Verifies that the provided private key matches the public key embedded in the leaf certificate.
+     */
+    public static boolean verifyKeyMatchesCertificate(String certPem, String keyPem) {
+        if (certPem == null || certPem.trim().isEmpty() || keyPem == null || keyPem.trim().isEmpty()) {
+            return false;
+        }
+        try {
+            List<X509Certificate> certs = parseCertificates(certPem);
+            if (certs.isEmpty()) return false;
+            PublicKey pubKey = certs.get(0).getPublicKey();
+            PrivateKey privKey = parsePrivateKey(keyPem);
+
+            byte[] challenge = "RoboGuide-Key-Match-Challenge-Nonce".getBytes(StandardCharsets.UTF_8);
+            String signAlgorithm;
+            String alg = pubKey.getAlgorithm();
+            if ("RSA".equalsIgnoreCase(alg)) {
+                signAlgorithm = "SHA256withRSA";
+            } else if ("EC".equalsIgnoreCase(alg)) {
+                signAlgorithm = "SHA256withECDSA";
+            } else {
+                signAlgorithm = "SHA256with" + alg;
+            }
+            java.security.Signature signer = java.security.Signature.getInstance(signAlgorithm);
+            signer.initSign(privKey);
+            signer.update(challenge);
+            byte[] signature = signer.sign();
+
+            java.security.Signature verifier = java.security.Signature.getInstance(signAlgorithm);
+            verifier.initVerify(pubKey);
+            verifier.update(challenge);
+            return verifier.verify(signature);
+        } catch (Exception e) {
+            Log.w(TAG, "Key and certificate match verification failed: " + e.getMessage());
+            return false;
+        }
     }
 
     /**
@@ -274,11 +336,16 @@ public class PhoneNodeSecurityHelper {
             File secDir = new File(context.getFilesDir(), "security");
             if (!secDir.exists()) {
                 secDir.mkdirs();
+                secDir.setReadable(true, true);
+                secDir.setWritable(true, true);
             }
             File credFile = new File(secDir, "credentials.json");
             try (FileOutputStream fos = new FileOutputStream(credFile)) {
                 fos.write(credentials.toString(2).getBytes(StandardCharsets.UTF_8));
             }
+            credFile.setReadable(false, false);
+            credFile.setReadable(true, true);
+            credFile.setWritable(true, true);
             Log.i(TAG, "Saved security credentials securely to " + credFile.getAbsolutePath());
         } catch (Exception e) {
             Log.e(TAG, "Failed to save secure credentials", e);
@@ -303,6 +370,23 @@ public class PhoneNodeSecurityHelper {
         } catch (Exception e) {
             Log.w(TAG, "Failed to load secure credentials from file: " + e.getMessage());
             return new JSONObject();
+        }
+    }
+
+    /**
+     * Explicitly delete secure credential storage.
+     */
+    public static synchronized boolean clearSecureStorage(Context context) {
+        if (context == null) return false;
+        try {
+            File credFile = new File(new File(context.getFilesDir(), "security"), "credentials.json");
+            if (credFile.exists()) {
+                return credFile.delete();
+            }
+            return true;
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to clear secure storage", e);
+            return false;
         }
     }
 }

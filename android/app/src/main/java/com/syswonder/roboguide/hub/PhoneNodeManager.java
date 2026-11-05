@@ -844,11 +844,14 @@ public class PhoneNodeManager {
     }
 
     private void applyTlsToConnection(HttpURLConnection conn, PhoneNodeSecurityHelper.SslBundle bundle) {
-        if (conn instanceof HttpsURLConnection && bundle != null) {
-            ((HttpsURLConnection) conn).setSSLSocketFactory(bundle.socketFactory);
-            if (currentConfig != null && currentConfig.tlsServerName != null && !currentConfig.tlsServerName.trim().isEmpty()) {
-                ((HttpsURLConnection) conn).setHostnameVerifier((hostname, session) -> true);
+        if (conn instanceof HttpsURLConnection) {
+            HttpsURLConnection httpsConn = (HttpsURLConnection) conn;
+            if (bundle != null && bundle.socketFactory != null) {
+                httpsConn.setSSLSocketFactory(bundle.socketFactory);
             }
+            String expectedServer = (currentConfig != null && currentConfig.tlsServerName != null)
+                    ? currentConfig.tlsServerName.trim() : "";
+            httpsConn.setHostnameVerifier(PhoneNodeSecurityHelper.createStrictHostnameVerifier(expectedServer));
         }
     }
 
