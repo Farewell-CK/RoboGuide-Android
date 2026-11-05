@@ -7,8 +7,18 @@ import android.util.Log;
 
 import org.json.JSONObject;
 
+import java.io.FileInputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -24,7 +34,8 @@ import roboguide.node.v0_4.RoboguideNode;
  * Formal RoboGuide Node Session Manager for Android Phone.
  * Implements bidirectional gRPC streaming protocol (roboguide.node-protocol/v0.4),
  * Hello -> Welcome -> Register -> Registered -> Heartbeat lifecycle,
- * Command receipt persistence, idempotency verification, system.ping and observation.acquire tasks.
+ * Command receipt persistence, idempotency verification, system.ping and observation.acquire tasks,
+ * Session restart/reconnection snapshot reconciliation, and Controller CAS artifact upload.
  */
 public class PhoneNodeManager {
     private static final String TAG = "PhoneNodeManager";
@@ -59,7 +70,8 @@ public class PhoneNodeManager {
     private final Context context;
     private final PhoneNodeJournal journal;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
-    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(4);
+    private final Map<String, Future<?>> activeExecutionTasks = new ConcurrentHashMap<>();
 
     private ManagedChannel channel;
     private StreamObserver<RoboguideNode.NodeMessage> requestObserver;
@@ -68,6 +80,7 @@ public class PhoneNodeManager {
 
     private String targetHost = "10.0.2.2";
     private int targetPort = 50051;
+    private int artifactPort = 8090;
     private boolean autoReconnect = true;
     private int reconnectBackoffSeconds = 2;
 
@@ -315,7 +328,7 @@ public class PhoneNodeManager {
                 .setRuntime(runtime)
                 .build();
 
-        // 1. system.ping@v1 capability & operation
+        // 1. system.ping@v1 capability & operation (kind = "compute")
         RoboguideNode.CapabilityProfile pingProfile = RoboguideNode.CapabilityProfile.newBuilder()
                 .setContract("system.ping@v1")
                 .setKind("compute")
@@ -334,10 +347,10 @@ public class PhoneNodeManager {
                 .setLocalSystemId("mobile-system")
                 .build();
 
-        // 2. observation.acquire@v1 capability & operation
+        // 2. observation.acquire@v1 capability & operation (kind = "observation")
         RoboguideNode.CapabilityProfile obsProfile = RoboguideNode.CapabilityProfile.newBuilder()
                 .setContract("observation.acquire@v1")
-                .setKind("sensing")
+                .setKind("observation")
                 .setLocalSystemId("mobile-system")
                 .setReady(true)
                 .build();
@@ -353,7 +366,7 @@ public class PhoneNodeManager {
                 .setLocalSystemId("mobile-system")
                 .build();
 
-        // Resources
+        // Resources (kind must be "space" | "compute" | "time")
         RoboguideNode.Resource pingResource = RoboguideNode.Resource.newBuilder()
                 .setId(nodeId + ":compute:local")
                 .setKind("compute")
@@ -362,8 +375,8 @@ public class PhoneNodeManager {
                 .build();
 
         RoboguideNode.Resource cameraResource = RoboguideNode.Resource.newBuilder()
-                .setId(nodeId + ":sensor:camera")
-                .setKind("sensing")
+                .setId(nodeId + ":compute:camera")
+                .setKind("compute")
                 .setCapacity(1)
                 .setLocalSystemId("mobile-system")
                 .build();
@@ -403,7 +416,32 @@ public class PhoneNodeManager {
         updateState(NodeState.STREAMING, "Registered (session=" + sessionId + ")");
         Log.i(TAG, "Registration accepted: session=" + sessionId + ", lease=" + leaseId);
 
+        // Reconcile durable state with Controller across restarts / reconnects
+        replaySnapshots();
+
         startHeartbeatLoop();
+    }
+
+    /**
+     * Replays ExecutionSnapshots from durable SQLite journal to the Controller.
+     * Prevents re-execution and reconciles existing/in-progress/terminal tasks without ID churn.
+     */
+    private void replaySnapshots() {
+        List<PhoneNodeJournal.ExecutionRecord> records = journal.getReconcilableExecutions();
+        Log.i(TAG, "Replaying " + records.size() + " execution snapshots to Controller for session reconciliation");
+        for (PhoneNodeJournal.ExecutionRecord r : records) {
+            long lastSeq = Math.max(journal.getLatestSequence(r.executionId), 1L);
+            RoboguideNode.ExecutionPhase phase = parsePhase(r.phase);
+            RoboguideNode.ExecutionSnapshot snapshot = RoboguideNode.ExecutionSnapshot.newBuilder()
+                    .setSessionId(sessionId)
+                    .setExecutionId(r.executionId)
+                    .setLastSequence(lastSeq)
+                    .setPhase(phase)
+                    .setReason(r.reason != null ? r.reason : "")
+                    .build();
+
+            sendNodeMessage(RoboguideNode.NodeMessage.newBuilder().setExecutionSnapshot(snapshot).build());
+        }
     }
 
     private synchronized void startHeartbeatLoop() {
@@ -458,7 +496,6 @@ public class PhoneNodeManager {
     private void handleExecute(RoboguideNode.Execute execute) {
         String executionId = execute.getExecutionId();
         String commandId = execute.getCommandId();
-        String execSessionId = execute.getSessionId();
 
         Log.i(TAG, "Received Execute: execution=" + executionId + ", command=" + commandId);
 
@@ -506,8 +543,15 @@ public class PhoneNodeManager {
         final String finalOperation = operation;
         final String finalParamsJson = paramsJson;
 
-        // 3. Process task in background executor
-        scheduler.execute(() -> processExecution(executionId, commandId, finalOperation, finalParamsJson));
+        // 3. Process task in background executor and register into active task tracker
+        Future<?> future = scheduler.submit(() -> {
+            try {
+                processExecution(executionId, commandId, finalOperation, finalParamsJson);
+            } finally {
+                activeExecutionTasks.remove(executionId);
+            }
+        });
+        activeExecutionTasks.put(executionId, future);
     }
 
     private String scalarToString(RoboguideNode.ScalarValue val) {
@@ -577,7 +621,7 @@ public class PhoneNodeManager {
     }
 
     private void executeObservationAcquire(String executionId, String paramsJson) {
-        String expectedCondition = "semantic observation";
+        String expectedCondition = "semantic site observation";
         try {
             JSONObject obj = new JSONObject(paramsJson);
             if (obj.has("expected")) {
@@ -593,6 +637,9 @@ public class PhoneNodeManager {
             return;
         }
 
+        // Upload artifact to Controller Content-Addressable Storage (CAS)
+        boolean uploaded = uploadArtifactToController(capture.filePath, capture.sha256Digest, capture.sizeBytes);
+
         try {
             JSONObject artJson = new JSONObject();
             artJson.put("status", "ok");
@@ -603,13 +650,14 @@ public class PhoneNodeManager {
             artifact.put("size_bytes", capture.sizeBytes);
             artifact.put("mime_type", capture.mimeType);
             artifact.put("timestamp_ms", capture.timestampMs);
+            artifact.put("uploaded_to_controller", uploaded);
             artJson.put("artifact", artifact);
 
             String resultReason = artJson.toString();
             journal.updateExecutionArtifact(executionId, "COMPLETED", resultReason,
                     capture.sha256Digest, capture.filePath, capture.sizeBytes);
             emitExecutionPhase(executionId, RoboguideNode.ExecutionPhase.COMPLETED, resultReason);
-            Log.i(TAG, "Observation acquire completed: " + executionId + ", digest=" + capture.sha256Digest);
+            Log.i(TAG, "Observation acquire completed: " + executionId + ", digest=" + capture.sha256Digest + ", uploaded=" + uploaded);
 
         } catch (Exception e) {
             String err = "E_ARTIFACT_PACKAGING: " + e.getMessage();
@@ -618,9 +666,108 @@ public class PhoneNodeManager {
         }
     }
 
+    /**
+     * Uploads captured artifact bytes to the formal Controller Artifact HTTP service.
+     */
+    private boolean uploadArtifactToController(String filePath, String sha256Digest, long sizeBytes) {
+        try {
+            String uploadId = "upload-phone-" + UUID.randomUUID().toString();
+            String artifactBaseUrl = "http://" + targetHost + ":" + artifactPort;
+
+            // 1. POST /v1/artifact-uploads
+            URL startUrl = new URL(artifactBaseUrl + "/v1/artifact-uploads");
+            HttpURLConnection conn1 = (HttpURLConnection) startUrl.openConnection();
+            conn1.setRequestMethod("POST");
+            conn1.setRequestProperty("Content-Type", "application/json");
+            conn1.setDoOutput(true);
+            conn1.setConnectTimeout(3000);
+            conn1.setReadTimeout(5000);
+            byte[] startBody = ("{\"upload_id\":\"" + uploadId + "\"}").getBytes(StandardCharsets.UTF_8);
+            try (OutputStream os = conn1.getOutputStream()) {
+                os.write(startBody);
+            }
+            int code1 = conn1.getResponseCode();
+            conn1.disconnect();
+            if (code1 != 200 && code1 != 201) {
+                Log.w(TAG, "Artifact upload start failed with HTTP " + code1);
+                return false;
+            }
+
+            // 2. POST /v1/artifact-uploads/{id}/content
+            URL contentUrl = new URL(artifactBaseUrl + "/v1/artifact-uploads/" + uploadId + "/content");
+            HttpURLConnection conn2 = (HttpURLConnection) contentUrl.openConnection();
+            conn2.setRequestMethod("POST");
+            conn2.setRequestProperty("Content-Type", "application/octet-stream");
+            conn2.setDoOutput(true);
+            conn2.setConnectTimeout(3000);
+            conn2.setReadTimeout(15000);
+            try (InputStream fis = new FileInputStream(filePath);
+                 OutputStream os = conn2.getOutputStream()) {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = fis.read(buf)) != -1) {
+                    os.write(buf, 0, n);
+                }
+            }
+            int code2 = conn2.getResponseCode();
+            conn2.disconnect();
+            if (code2 != 200 && code2 != 202) {
+                Log.w(TAG, "Artifact upload content failed with HTTP " + code2);
+                return false;
+            }
+
+            // 3. POST /v1/artifact-uploads/{id}/finalize
+            URL finalizeUrl = new URL(artifactBaseUrl + "/v1/artifact-uploads/" + uploadId + "/finalize");
+            HttpURLConnection conn3 = (HttpURLConnection) finalizeUrl.openConnection();
+            conn3.setRequestMethod("POST");
+            conn3.setRequestProperty("Content-Type", "application/json");
+            conn3.setDoOutput(true);
+            conn3.setConnectTimeout(3000);
+            conn3.setReadTimeout(5000);
+            byte[] finBody = ("{\"content_digest\":\"" + sha256Digest + "\",\"byte_size\":" + sizeBytes + "}").getBytes(StandardCharsets.UTF_8);
+            try (OutputStream os = conn3.getOutputStream()) {
+                os.write(finBody);
+            }
+            int code3 = conn3.getResponseCode();
+            conn3.disconnect();
+            if (code3 != 200 && code3 != 201) {
+                Log.w(TAG, "Artifact upload finalize failed with HTTP " + code3);
+                return false;
+            }
+
+            Log.i(TAG, "Artifact uploaded successfully to Controller CAS: " + sha256Digest + " (upload_id=" + uploadId + ")");
+            return true;
+        } catch (Exception e) {
+            Log.w(TAG, "Artifact upload skipped or failed (offline / endpoint unreachable): " + e.getMessage());
+            return false;
+        }
+    }
+
     private void handleCancel(RoboguideNode.Cancel cancel) {
         String executionId = cancel.getExecutionId();
-        Log.i(TAG, "Received Cancel for execution=" + executionId);
+        String commandId = cancel.getCommandId();
+        Log.i(TAG, "Received Cancel for execution=" + executionId + ", command=" + commandId);
+
+        // 1. Immediately acknowledge Cancel persistence to Controller
+        long receiptSeq = sequenceGenerator.getAndIncrement();
+        RoboguideNode.CommandReceipt receipt = RoboguideNode.CommandReceipt.newBuilder()
+                .setSessionId(sessionId)
+                .setSequence(receiptSeq)
+                .setCommandId(commandId)
+                .setExecutionId(executionId)
+                .setKind(RoboguideNode.CommandKind.COMMAND_CANCEL)
+                .setStatus(RoboguideNode.CommandReceiptStatus.COMMAND_PERSISTED)
+                .setReason("")
+                .build();
+        sendNodeMessage(RoboguideNode.NodeMessage.newBuilder().setCommandReceipt(receipt).build());
+
+        // 2. Abort active background task if running
+        Future<?> activeTask = activeExecutionTasks.remove(executionId);
+        if (activeTask != null) {
+            activeTask.cancel(true);
+        }
+
+        // 3. Record CANCELLED in journal and emit event
         journal.updateExecutionPhase(executionId, "CANCELLED", "Execution cancelled by Controller");
         emitExecutionPhase(executionId, RoboguideNode.ExecutionPhase.CANCELLED, "Execution cancelled by Controller");
     }

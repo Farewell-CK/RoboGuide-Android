@@ -316,13 +316,13 @@ async function submitMissionPlan(capabilityContract: string, parameters: Record<
       roles: [{
         id: 'phone-exec-role',
         actor: 'phone-actor',
-        capability: capabilityContract.startsWith('observation') ? 'sensing' : 'compute',
+        capability: capabilityContract.startsWith('observation') ? 'observation' : 'compute',
         contract: {
           namespace: namespace,
           name: name,
           version: version
         },
-        resource_kind: capabilityContract.startsWith('observation') ? 'sensor' : 'compute',
+        resource_kind: 'compute',
         context_role: 'phone-role',
         resource_scope: 'task',
         execution: {

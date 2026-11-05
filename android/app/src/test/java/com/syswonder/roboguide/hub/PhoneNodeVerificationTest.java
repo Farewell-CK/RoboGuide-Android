@@ -14,7 +14,8 @@ import roboguide.node.v0_4.RoboguideNode;
 /**
  * End-to-end Verification Unit Tests for formal RoboGuide Android Phone Node.
  * Verifies wire protocol serialization, contract negotiation, command receipt semantics,
- * idempotency vs conflict detection, artifact digest generation, and phase transitions.
+ * idempotency vs conflict detection, artifact digest generation, phase transitions,
+ * Cancellation receipts, and ExecutionSnapshot session reconciliation.
  */
 public class PhoneNodeVerificationTest {
 
@@ -63,7 +64,7 @@ public class PhoneNodeVerificationTest {
                 .setRuntime(runtime)
                 .build();
 
-        // 1. system.ping@v1
+        // 1. system.ping@v1 (kind = "compute")
         RoboguideNode.CapabilityProfile pingProfile = RoboguideNode.CapabilityProfile.newBuilder()
                 .setContract("system.ping@v1")
                 .setKind("compute")
@@ -82,10 +83,10 @@ public class PhoneNodeVerificationTest {
                 .setLocalSystemId("mobile-system")
                 .build();
 
-        // 2. observation.acquire@v1
+        // 2. observation.acquire@v1 (kind = "observation", strictly enforced by Controller validator)
         RoboguideNode.CapabilityProfile obsProfile = RoboguideNode.CapabilityProfile.newBuilder()
                 .setContract("observation.acquire@v1")
-                .setKind("sensing")
+                .setKind("observation")
                 .setLocalSystemId("mobile-system")
                 .setReady(true)
                 .build();
@@ -101,7 +102,7 @@ public class PhoneNodeVerificationTest {
                 .setLocalSystemId("mobile-system")
                 .build();
 
-        // Resources
+        // Resources (kind must be "space" | "compute" | "time")
         RoboguideNode.Resource pingResource = RoboguideNode.Resource.newBuilder()
                 .setId(testNodeId + ":compute:local")
                 .setKind("compute")
@@ -110,8 +111,8 @@ public class PhoneNodeVerificationTest {
                 .build();
 
         RoboguideNode.Resource cameraResource = RoboguideNode.Resource.newBuilder()
-                .setId(testNodeId + ":sensor:camera")
-                .setKind("sensing")
+                .setId(testNodeId + ":compute:camera")
+                .setKind("compute")
                 .setCapacity(1)
                 .setLocalSystemId("mobile-system")
                 .build();
@@ -145,8 +146,12 @@ public class PhoneNodeVerificationTest {
         assertEquals("roboguide.node.v0.6", parsedReg.getNodeContractVersion());
         assertEquals(2, parsedReg.getCapabilityProfilesCount());
         assertEquals("system.ping@v1", parsedReg.getCapabilityProfiles(0).getContract());
+        assertEquals("compute", parsedReg.getCapabilityProfiles(0).getKind());
         assertEquals("observation.acquire@v1", parsedReg.getCapabilityProfiles(1).getContract());
+        assertEquals("observation", parsedReg.getCapabilityProfiles(1).getKind());
         assertEquals(2, parsedReg.getResourcesCount());
+        assertEquals("compute", parsedReg.getResources(0).getKind());
+        assertEquals("compute", parsedReg.getResources(1).getKind());
     }
 
     @Test
@@ -180,6 +185,76 @@ public class PhoneNodeVerificationTest {
         assertEquals(commandId, parsedReceipt.getCommandId());
         assertEquals(RoboguideNode.CommandKind.COMMAND_EXECUTE, parsedReceipt.getKind());
         assertEquals(RoboguideNode.CommandReceiptStatus.COMMAND_PERSISTED, parsedReceipt.getStatus());
+    }
+
+    @Test
+    public void testCancelCommandReceiptAndEventSemantics() throws Exception {
+        String sessionId = "grpc-session-test-01";
+        String executionId = "exec-ping-1002";
+        String cancelCommandId = "cancel-" + executionId;
+        long sequence = 3L;
+
+        // Cancel CommandReceipt
+        RoboguideNode.CommandReceipt cancelReceipt = RoboguideNode.CommandReceipt.newBuilder()
+                .setSessionId(sessionId)
+                .setSequence(sequence)
+                .setCommandId(cancelCommandId)
+                .setExecutionId(executionId)
+                .setKind(RoboguideNode.CommandKind.COMMAND_CANCEL)
+                .setStatus(RoboguideNode.CommandReceiptStatus.COMMAND_PERSISTED)
+                .setReason("")
+                .build();
+
+        RoboguideNode.NodeMessage receiptMsg = RoboguideNode.NodeMessage.newBuilder()
+                .setCommandReceipt(cancelReceipt)
+                .build();
+        RoboguideNode.NodeMessage parsedReceiptMsg = RoboguideNode.NodeMessage.parseFrom(receiptMsg.toByteArray());
+        assertEquals(RoboguideNode.CommandKind.COMMAND_CANCEL, parsedReceiptMsg.getCommandReceipt().getKind());
+
+        // Cancelled ExecutionEvent
+        RoboguideNode.ExecutionEvent cancelEvent = RoboguideNode.ExecutionEvent.newBuilder()
+                .setSessionId(sessionId)
+                .setExecutionId(executionId)
+                .setSequence(sequence + 1)
+                .setPhase(RoboguideNode.ExecutionPhase.CANCELLED)
+                .setReason("Execution cancelled by Controller")
+                .build();
+
+        RoboguideNode.NodeMessage eventMsg = RoboguideNode.NodeMessage.newBuilder()
+                .setExecutionEvent(cancelEvent)
+                .build();
+        RoboguideNode.NodeMessage parsedEventMsg = RoboguideNode.NodeMessage.parseFrom(eventMsg.toByteArray());
+        assertEquals(RoboguideNode.ExecutionPhase.CANCELLED, parsedEventMsg.getExecutionEvent().getPhase());
+    }
+
+    @Test
+    public void testExecutionSnapshotWireSerializationForReconnectReconciliation() throws Exception {
+        String sessionId = "grpc-session-reconnect-02";
+        String executionId = "exec-obs-3001";
+        long lastSequence = 5L;
+
+        RoboguideNode.ExecutionSnapshot snapshot = RoboguideNode.ExecutionSnapshot.newBuilder()
+                .setSessionId(sessionId)
+                .setExecutionId(executionId)
+                .setLastSequence(lastSequence)
+                .setPhase(RoboguideNode.ExecutionPhase.COMPLETED)
+                .setReason("{\"status\":\"ok\",\"artifact\":{\"digest\":\"sha256:123456\"}}")
+                .build();
+
+        RoboguideNode.NodeMessage outbound = RoboguideNode.NodeMessage.newBuilder()
+                .setExecutionSnapshot(snapshot)
+                .build();
+
+        byte[] wireBytes = outbound.toByteArray();
+        RoboguideNode.NodeMessage parsed = RoboguideNode.NodeMessage.parseFrom(wireBytes);
+        assertEquals(RoboguideNode.NodeMessage.MessageCase.EXECUTION_SNAPSHOT, parsed.getMessageCase());
+
+        RoboguideNode.ExecutionSnapshot parsedSnapshot = parsed.getExecutionSnapshot();
+        assertEquals(sessionId, parsedSnapshot.getSessionId());
+        assertEquals(executionId, parsedSnapshot.getExecutionId());
+        assertEquals(lastSequence, parsedSnapshot.getLastSequence());
+        assertEquals(RoboguideNode.ExecutionPhase.COMPLETED, parsedSnapshot.getPhase());
+        assertTrue(parsedSnapshot.getReason().contains("sha256:123456"));
     }
 
     @Test

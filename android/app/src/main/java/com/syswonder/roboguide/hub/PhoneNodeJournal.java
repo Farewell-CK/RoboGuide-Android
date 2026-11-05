@@ -9,6 +9,8 @@ import android.database.sqlite.SQLiteOpenHelper;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -206,6 +208,48 @@ public class PhoneNodeJournal extends SQLiteOpenHelper {
         cv.put("reason", reason);
         cv.put("timestamp_ms", System.currentTimeMillis());
         db.insert("execution_events", null, cv);
+    }
+
+    public synchronized long getLatestSequence(String executionId) {
+        SQLiteDatabase db = getReadableDatabase();
+        Cursor cursor = db.rawQuery("SELECT MAX(sequence) FROM execution_events WHERE execution_id = ?",
+                new String[]{executionId});
+        try {
+            if (cursor.moveToFirst()) {
+                return cursor.getLong(0);
+            }
+        } finally {
+            cursor.close();
+        }
+        return 1L;
+    }
+
+    public synchronized List<ExecutionRecord> getReconcilableExecutions() {
+        List<ExecutionRecord> list = new ArrayList<>();
+        SQLiteDatabase db = getReadableDatabase();
+        // Return active and recent executions (last 50) for session reconciliation
+        Cursor cursor = db.query("executions", null, null, null, null, null, "created_at_ms DESC", "50");
+        try {
+            while (cursor.moveToNext()) {
+                ExecutionRecord r = new ExecutionRecord();
+                r.executionId = cursor.getString(cursor.getColumnIndexOrThrow("execution_id"));
+                r.commandId = cursor.getString(cursor.getColumnIndexOrThrow("command_id"));
+                r.sessionId = cursor.getString(cursor.getColumnIndexOrThrow("session_id"));
+                r.operation = cursor.getString(cursor.getColumnIndexOrThrow("operation"));
+                r.parametersJson = cursor.getString(cursor.getColumnIndexOrThrow("parameters_json"));
+                r.phase = cursor.getString(cursor.getColumnIndexOrThrow("phase"));
+                r.reason = cursor.getString(cursor.getColumnIndexOrThrow("reason"));
+                r.artifactDigest = cursor.getString(cursor.getColumnIndexOrThrow("artifact_digest"));
+                r.artifactPath = cursor.getString(cursor.getColumnIndexOrThrow("artifact_path"));
+                r.artifactSize = cursor.getLong(cursor.getColumnIndexOrThrow("artifact_size"));
+                r.createdAtMs = cursor.getLong(cursor.getColumnIndexOrThrow("created_at_ms"));
+                r.updatedAtMs = cursor.getLong(cursor.getColumnIndexOrThrow("updated_at_ms"));
+                list.add(r);
+            }
+        } finally {
+            cursor.close();
+        }
+        return list;
     }
 
     public synchronized JSONArray listExecutionsAsJson(int limit) {
