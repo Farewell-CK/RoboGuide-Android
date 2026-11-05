@@ -40,8 +40,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Camera Capture Helper for observation.acquire@v1 on RoboGuide Android Phone Node.
- * Enforces camera permission verification, captures real image artifact (via physical Camera2 or sensor fallback),
- * computes SHA-256 digest, and persists to app artifact directory.
+ * Enforces camera permission verification, captures real image artifact via Camera2 API,
+ * closes camera devices and image readers deterministically across all exit paths,
+ * computes SHA-256 digest, and strictly disallows synthetic fallbacks during real execution.
  */
 public class CameraCaptureHelper {
     private static final String TAG = "CameraCaptureHelper";
@@ -56,12 +57,30 @@ public class CameraCaptureHelper {
         public long timestampMs;
     }
 
+    /**
+     * Default observation capture: strictly disallows synthetic demo fallbacks.
+     */
     public static CaptureResult captureObservation(Context context, String executionId, String expectedCondition) {
+        return captureObservation(context, executionId, expectedCondition, false);
+    }
+
+    /**
+     * Observation capture with explicit fallback control.
+     * @param allowDemoFallback If false (production), failure/missing camera strictly returns error.
+     *                          If true (isolated DEMO only), generates synthetic visual marker.
+     */
+    public static CaptureResult captureObservation(Context context, String executionId, String expectedCondition, boolean allowDemoFallback) {
         CaptureResult result = new CaptureResult();
         result.timestampMs = System.currentTimeMillis();
         result.mimeType = "image/jpeg";
 
         // 1. Strict permission check
+        if (context == null) {
+            result.success = false;
+            result.errorMessage = "E_PERMISSION_DENIED: Android Context unavailable or missing CAMERA permission";
+            return result;
+        }
+
         int permissionCheck = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA);
         if (permissionCheck != PackageManager.PERMISSION_GRANTED) {
             result.success = false;
@@ -82,20 +101,33 @@ public class CameraCaptureHelper {
             // 3. Try capturing from physical hardware camera via Camera2 API
             boolean physicalCaptured = tryPhysicalCameraCapture(context, outputFile);
             if (!physicalCaptured) {
-                // Fallback to high-fidelity optical sensor reticle frame with authentic metadata
-                Log.i(TAG, "Using optical sensor synthesis for observation artifact");
-                generateSensorFallbackImage(outputFile, executionId, expectedCondition, result.timestampMs);
+                if (!allowDemoFallback) {
+                    // Production path: never falsify real observation with synthetic images
+                    result.success = false;
+                    result.errorMessage = "E_CAMERA_UNAVAILABLE: Physical camera capture failed or camera hardware busy/unavailable";
+                    return result;
+                } else {
+                    // Isolated demo path only
+                    Log.i(TAG, "DEMO MODE: Using synthetic sensor pattern for observation artifact");
+                    generateSensorFallbackImage(outputFile, executionId, expectedCondition, result.timestampMs);
+                }
             }
 
-            // 4. Compute exact SHA-256 digest over the persisted bytes
+            if (!outputFile.exists() || outputFile.length() == 0) {
+                result.success = false;
+                result.errorMessage = "E_CAPTURE_FAILED: Output image file was not created or has 0 bytes";
+                return result;
+            }
+
+            // 4. Compute exact SHA-256 digest over persisted bytes
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             byte[] buffer = new byte[8192];
             int read;
-            InputStream is = new FileInputStream(outputFile);
-            while ((read = is.read(buffer)) != -1) {
-                digest.update(buffer, 0, read);
+            try (InputStream is = new FileInputStream(outputFile)) {
+                while ((read = is.read(buffer)) != -1) {
+                    digest.update(buffer, 0, read);
+                }
             }
-            is.close();
 
             byte[] hashBytes = digest.digest();
             StringBuilder sb = new StringBuilder();
@@ -130,10 +162,13 @@ public class CameraCaptureHelper {
         final AtomicBoolean captured = new AtomicBoolean(false);
         final CountDownLatch latch = new CountDownLatch(1);
 
+        CameraDevice[] openDeviceHolder = new CameraDevice[1];
+        CameraCaptureSession[] openSessionHolder = new CameraCaptureSession[1];
+        ImageReader[] openReaderHolder = new ImageReader[1];
+
         try {
             String[] cameraIdList = manager.getCameraIdList();
             if (cameraIdList.length == 0) {
-                bgThread.quitSafely();
                 return false;
             }
 
@@ -148,6 +183,8 @@ public class CameraCaptureHelper {
             }
 
             final ImageReader imageReader = ImageReader.newInstance(1280, 720, ImageFormat.JPEG, 2);
+            openReaderHolder[0] = imageReader;
+
             imageReader.setOnImageAvailableListener(reader -> {
                 Image image = null;
                 try {
@@ -156,17 +193,17 @@ public class CameraCaptureHelper {
                         ByteBuffer buffer = image.getPlanes()[0].getBuffer();
                         byte[] bytes = new byte[buffer.remaining()];
                         buffer.get(bytes);
-                        FileOutputStream fos = new FileOutputStream(outputFile);
-                        fos.write(bytes);
-                        fos.flush();
-                        fos.close();
+                        try (FileOutputStream fos = new FileOutputStream(outputFile)) {
+                            fos.write(bytes);
+                            fos.flush();
+                        }
                         captured.set(true);
                     }
                 } catch (Exception e) {
                     Log.w(TAG, "Failed to write image from ImageReader", e);
                 } finally {
                     if (image != null) {
-                        image.close();
+                        try { image.close(); } catch (Exception ignored) {}
                     }
                     latch.countDown();
                 }
@@ -175,12 +212,14 @@ public class CameraCaptureHelper {
             manager.openCamera(targetCameraId, new CameraDevice.StateCallback() {
                 @Override
                 public void onOpened(@NonNull CameraDevice camera) {
+                    openDeviceHolder[0] = camera;
                     try {
                         camera.createCaptureSession(
                                 Collections.singletonList(imageReader.getSurface()),
                                 new CameraCaptureSession.StateCallback() {
                                     @Override
                                     public void onConfigured(@NonNull CameraCaptureSession session) {
+                                        openSessionHolder[0] = session;
                                         try {
                                             CaptureRequest.Builder builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
                                             builder.addTarget(imageReader.getSurface());
@@ -214,38 +253,64 @@ public class CameraCaptureHelper {
 
                 @Override
                 public void onDisconnected(@NonNull CameraDevice camera) {
-                    camera.close();
+                    try { camera.close(); } catch (Exception ignored) {}
+                    openDeviceHolder[0] = null;
                     latch.countDown();
                 }
 
                 @Override
                 public void onError(@NonNull CameraDevice camera, int error) {
-                    camera.close();
+                    try { camera.close(); } catch (Exception ignored) {}
+                    openDeviceHolder[0] = null;
                     latch.countDown();
                 }
             }, bgHandler);
 
-            boolean finished = latch.await(2500, TimeUnit.MILLISECONDS);
+            boolean finished = latch.await(3000, TimeUnit.MILLISECONDS);
             if (!finished) {
-                Log.w(TAG, "Physical camera capture timed out");
+                Log.w(TAG, "Physical camera capture timed out after 3000ms");
             }
 
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            Log.w(TAG, "Physical camera capture interrupted during latch await");
+            return false;
         } catch (Throwable t) {
             Log.w(TAG, "Physical camera capture exception: " + t.getMessage());
         } finally {
+            // Clean up session
+            if (openSessionHolder[0] != null) {
+                try { openSessionHolder[0].close(); } catch (Exception ignored) {}
+            }
+            // Clean up device
+            if (openDeviceHolder[0] != null) {
+                try { openDeviceHolder[0].close(); } catch (Exception ignored) {}
+            }
+            // Clean up image reader
+            if (openReaderHolder[0] != null) {
+                try { openReaderHolder[0].close(); } catch (Exception ignored) {}
+            }
+            // Quit background thread safely
             bgThread.quitSafely();
+            try {
+                bgThread.join(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
 
         return captured.get();
     }
 
-    private static void generateSensorFallbackImage(File outputFile, String executionId, String expectedCondition, long timestampMs) throws Exception {
+    /**
+     * Isolated DEMO helper: generates labeled test pattern strictly when explicitly authorized.
+     */
+    public static void generateSensorFallbackImage(File outputFile, String executionId, String expectedCondition, long timestampMs) throws Exception {
         int width = 1280;
         int height = 720;
         Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
 
-        // Background representing optical capture
         canvas.drawColor(Color.rgb(24, 28, 36));
 
         Paint paint = new Paint();
@@ -261,8 +326,8 @@ public class CameraCaptureHelper {
             canvas.drawLine(0, y, width, y, paint);
         }
 
-        // Central crosshair & optical target
-        paint.setColor(Color.rgb(56, 189, 248)); // Sky blue
+        // Central crosshair
+        paint.setColor(Color.rgb(56, 189, 248));
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(3f);
         canvas.drawCircle(width / 2f, height / 2f, 80f, paint);
@@ -276,18 +341,18 @@ public class CameraCaptureHelper {
         SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", Locale.US);
         String timeStr = sdf.format(new Date(timestampMs));
 
-        canvas.drawText("ROBOGUIDE OPTICAL OBSERVATION ARTIFACT", 40, 50, paint);
+        canvas.drawText("[DEMO SIMULATION] OPTICAL OBSERVATION ARTIFACT", 40, 50, paint);
         paint.setTextSize(20f);
         paint.setColor(Color.rgb(200, 210, 225));
         canvas.drawText("Execution ID: " + executionId, 40, 90, paint);
         canvas.drawText("Timestamp:    " + timeStr, 40, 120, paint);
         canvas.drawText("Condition:    " + (expectedCondition != null ? expectedCondition : "unspecified"), 40, 150, paint);
-        canvas.drawText("Device Sensor: Android Camera Sensor Capture", 40, 180, paint);
+        canvas.drawText("Device Sensor: [DEMO ONLY] Simulated Pattern", 40, 180, paint);
 
-        FileOutputStream fos = new FileOutputStream(outputFile);
-        bitmap.compress(Bitmap.CompressFormat.JPEG, 92, fos);
-        fos.flush();
-        fos.close();
+        try (FileOutputStream fos = new FileOutputStream(outputFile)) {
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 92, fos);
+            fos.flush();
+        }
         bitmap.recycle();
     }
 }

@@ -29,9 +29,9 @@ export interface DeviceTelemetry {
   status: DeviceStatus;
   ip: string;
   tailscaleIp?: string;
-  batteryPercent: number;
+  batteryPercent?: number;
   batteryVoltage?: number;
-  pose: {
+  pose?: {
     x: number;
     y: number;
     theta: number; // yaw in radians

@@ -40,7 +40,7 @@ export interface ManualCaptureResult {
 
 export interface PhoneNodePluginInterface {
   getNodeStatus(): Promise<NodeStatus>;
-  connect(options: { host: string; port: number }): Promise<{ status: string; endpoint: string }>;
+  connect(options: { host: string; port: number; artifactPort?: number }): Promise<{ status: string; endpoint: string; artifactPort?: number }>;
   disconnect(): Promise<{ status: string }>;
   getJournalRecords(options?: { limit?: number }): Promise<{ records: ExecutionJournalRecord[] }>;
   requestCameraPermission(): Promise<{ granted: boolean }>;

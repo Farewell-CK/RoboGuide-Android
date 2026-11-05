@@ -86,11 +86,13 @@ public class PhoneNodePlugin extends Plugin {
     public void connect(PluginCall call) {
         String host = call.getString("host", "127.0.0.1");
         int port = call.getInt("port", 50051);
-        manager.connect(host, port);
+        int artifactPort = call.getInt("artifactPort", 8090);
+        manager.connect(host, port, artifactPort);
 
         JSObject ret = new JSObject();
         ret.put("status", "connecting");
         ret.put("endpoint", host + ":" + port);
+        ret.put("artifactPort", artifactPort);
         call.resolve(ret);
     }
 

@@ -231,7 +231,8 @@ export async function connectNativeNode() {
   try {
     const { host } = parseHostAndPort(swarmState.controllerEndpoint);
     const grpcPort = swarmState.grpcPort || 50051;
-    await PhoneNode.connect({ host, port: grpcPort });
+    const artifactPort = 8090;
+    await PhoneNode.connect({ host, port: grpcPort, artifactPort });
     await refreshNodeStatus();
   } catch (e) {
     console.error('Failed to initiate native PhoneNode connection', e);
@@ -287,23 +288,66 @@ export async function fetchControllerInventory() {
           const isPhone = node.node_id === swarmState.phoneNodeId || node.node_id?.startsWith('node-phone-');
           const isDog = node.node_id?.includes('dog') || node.node_id?.includes('thor');
           
+          // Formal RG Inventory Contract: reported_health ("Online" | "Degraded" | "Offline" | "SafeStopped")
+          // and liveness ("Reachable" | "Unreachable")
+          let devStatus: 'ONLINE' | 'BUSY' | 'IDLE' | 'OFFLINE' | 'ESTOP' = 'OFFLINE';
+          const rh = String(node.reported_health || node.status || '').toLowerCase();
+          const liveness = String(node.liveness || '').toLowerCase();
+
+          if (rh === 'safestopped' || rh === 'estop') {
+            devStatus = 'ESTOP';
+          } else if (rh === 'degraded' || rh === 'busy') {
+            devStatus = 'BUSY';
+          } else if (rh === 'online' || rh === 'healthy') {
+            devStatus = 'ONLINE';
+          } else if (liveness === 'reachable' && rh !== 'offline') {
+            devStatus = 'ONLINE';
+          } else {
+            devStatus = 'OFFLINE';
+          }
+
+          // Parse capabilities and contracts according to RG inventory v0.1 schema
+          let caps: any[] = [];
+          if (Array.isArray(node.capabilities)) {
+            caps = node.capabilities.map((c: any, idx: number) => {
+              const contract = Array.isArray(node.contracts) && node.contracts[idx] ? node.contracts[idx] : `${c.kind || 'capability'}@v1`;
+              const kindUpper = c.kind ? (c.kind.charAt(0).toUpperCase() + c.kind.slice(1)) : 'Compute';
+              return {
+                kind: kindUpper,
+                contract: contract,
+                detail: `Available: ${c.available}`,
+                available: Boolean(c.available)
+              };
+            });
+          } else if (Array.isArray(node.capability_profiles)) {
+            caps = node.capability_profiles.map((cp: any) => {
+              const kindUpper = cp.kind ? (cp.kind.charAt(0).toUpperCase() + cp.kind.slice(1)) : 'Compute';
+              return {
+                kind: kindUpper,
+                contract: cp.contract || 'unknown',
+                detail: `Ready: ${cp.ready}`,
+                available: Boolean(cp.ready)
+              };
+            });
+          }
+
+          // Pose: only present if genuine coordinates are provided by localization; otherwise leave undefined (Unknown)
+          const genuinePose = (node.pose && typeof node.pose.x === 'number' && !isNaN(node.pose.x))
+            ? { x: node.pose.x, y: node.pose.y, theta: node.pose.theta || 0 }
+            : undefined;
+
           return {
             id: node.node_id || 'unknown-node',
             name: isPhone ? `手机终端 (${node.node_id})` : (node.name || node.node_id),
             roleTag: isPhone ? '交互与采图' : (isDog ? '自主机器狗' : '计算节点'),
             kind: isPhone ? 'human_terminal' : (isDog ? 'legged_dog' : 'fixed_camera'),
-            status: node.status === 'online' ? 'ONLINE' : (node.status === 'busy' ? 'BUSY' : 'OFFLINE'),
+            status: devStatus,
             ip: node.endpoint || 'N/A',
             batteryPercent: undefined,
-            pose: { x: 0, y: 0, theta: 0 },
-            currentMode: node.status || 'unknown',
+            pose: genuinePose,
+            currentMode: node.reported_health || node.status || 'unknown',
             hasActiveMap: false,
-            capabilities: Array.isArray(node.capability_profiles) ? node.capability_profiles.map((cp: any) => ({
-              kind: cp.kind || 'Compute',
-              contract: cp.contract || 'unknown',
-              detail: `Ready: ${cp.ready}`,
-              available: Boolean(cp.ready)
-            })) : []
+            capabilities: caps
           };
         });
         swarmState.devices = mappedDevices;
@@ -405,7 +449,7 @@ export function startTelemetryPolling() {
       if (!swarmState.eStopTriggered) {
         simStep += 0.05;
         const dogAlpha = swarmState.devices.find(d => d.id === 'sim-dog-alpha');
-        if (dogAlpha) {
+        if (dogAlpha && dogAlpha.pose) {
           dogAlpha.pose.x = 0.8 * Math.cos(simStep * 0.6) + 0.5;
           dogAlpha.pose.y = 1.2 * Math.sin(simStep * 0.6) + 1.2;
           dogAlpha.pose.theta = Math.atan2(
