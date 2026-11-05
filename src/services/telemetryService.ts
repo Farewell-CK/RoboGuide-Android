@@ -7,7 +7,8 @@ import type {
   EnvProfileType, 
   EnvProfileConfig, 
   TargetGoal, 
-  ClarificationQuestion 
+  ClarificationQuestion,
+  ClusterSecurityConfig
 } from '../types/swarm';
 import { PhoneNode, type NodeStatus, type ExecutionJournalRecord } from './phoneNodePlugin';
 
@@ -232,12 +233,70 @@ export function switchEnvironment(profileId: EnvProfileType, customEndpoint?: st
   }
 }
 
-export async function connectNativeNode() {
+export async function executeOperatorRequest(
+  method: 'GET' | 'POST' | 'PUT',
+  path: string,
+  body?: any
+): Promise<{ ok: boolean; status: number; data?: any; rawBody?: string }> {
   try {
-    const { host } = parseHostAndPort(swarmState.controllerEndpoint);
-    const grpcPort = swarmState.grpcPort || 50051;
-    const artifactPort = swarmState.profiles[swarmState.currentProfile]?.artifactPort || 8090;
-    await PhoneNode.connect({ host, port: grpcPort, artifactPort });
+    const res = await PhoneNode.operatorRequest({ method, path, body });
+    return {
+      ok: res.status >= 200 && res.status < 300,
+      status: res.status,
+      data: res.data,
+      rawBody: res.rawBody
+    };
+  } catch (e: any) {
+    console.warn(`Native operatorRequest failed for ${path}:`, e);
+    // Fallback for browser preview mode
+    try {
+      const url = `${swarmState.controllerEndpoint.replace(/\/$/, '')}${path.startsWith('/') ? path : '/' + path}`;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3000);
+      const res = await fetch(url, {
+        method,
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined,
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      const data = await res.json().catch(() => null);
+      return { ok: res.ok, status: res.status, data };
+    } catch (fetchErr) {
+      return { ok: false, status: 0 };
+    }
+  }
+}
+
+export async function loadClusterSecurityConfig(): Promise<ClusterSecurityConfig> {
+  return await PhoneNode.getConfig();
+}
+
+export async function saveClusterSecurityConfig(cfg: ClusterSecurityConfig): Promise<any> {
+  const res = await PhoneNode.saveConfig({ config: cfg });
+  await connectNativeNode(cfg);
+  return res;
+}
+
+export async function generateDeviceIdentity(algorithm: 'EC' | 'RSA' = 'EC', nodeId?: string) {
+  return await PhoneNode.generateDeviceIdentity({ algorithm, nodeId });
+}
+
+export async function connectNativeNode(explicitConfig?: any) {
+  try {
+    if (explicitConfig) {
+      await PhoneNode.connect({ config: explicitConfig });
+    } else {
+      const savedConfig = await PhoneNode.getConfig();
+      if (savedConfig && (savedConfig.nodeGrpcHost || savedConfig.useMtls)) {
+        await PhoneNode.connect({ config: savedConfig });
+      } else {
+        const { host } = parseHostAndPort(swarmState.controllerEndpoint);
+        const grpcPort = swarmState.grpcPort || 50051;
+        const artifactPort = swarmState.profiles[swarmState.currentProfile]?.artifactPort || 8090;
+        await PhoneNode.connect({ host, port: grpcPort, artifactPort });
+      }
+    }
     await refreshNodeStatus();
   } catch (e) {
     console.error('Failed to initiate native PhoneNode connection', e);
@@ -272,19 +331,10 @@ export async function fetchControllerInventory() {
   isPollingInventory = true;
 
   try {
-    const url = `${swarmState.controllerEndpoint.replace(/\/$/, '')}/v1/inventory`;
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2500);
+    const res = await executeOperatorRequest('GET', '/v1/inventory');
 
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: { 'Accept': 'application/json' },
-      signal: controller.signal
-    });
-    clearTimeout(timeoutId);
-
-    if (res.ok) {
-      const data = await res.json();
+    if (res.ok && res.data) {
+      const data = res.data;
       swarmState.controllerOnline = true;
       swarmState.inventoryLastUpdatedMs = Date.now();
 

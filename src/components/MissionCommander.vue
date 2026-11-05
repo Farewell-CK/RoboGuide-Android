@@ -235,7 +235,7 @@
 
 <script setup lang="ts">
 import { ref } from 'vue';
-import { swarmState, refreshJournalRecords, refreshNodeStatus } from '../services/telemetryService';
+import { swarmState, refreshJournalRecords, refreshNodeStatus, executeOperatorRequest } from '../services/telemetryService';
 import { PhoneNode } from '../services/phoneNodePlugin';
 
 const promptInput = ref('');
@@ -338,18 +338,12 @@ async function submitMissionPlan(capabilityContract: string, parameters: Record<
   };
 
   try {
-    const url = `${swarmState.controllerEndpoint.replace(/\/$/, '')}/v1/missions`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(plan)
-    });
+    const res = await executeOperatorRequest('POST', '/v1/missions', plan);
 
-    const bodyText = await res.text();
     if (res.ok) {
       submissionFeedback.value = {
         success: true,
-        message: `Mission ${missionId} 提交成功: ${bodyText}`
+        message: `Mission ${missionId} 提交成功 (HTTP ${res.status}): ${JSON.stringify(res.data || 'OK')}`
       };
       // Poll journal for execution receipt
       setTimeout(refreshJournal, 500);
@@ -358,13 +352,13 @@ async function submitMissionPlan(capabilityContract: string, parameters: Record<
     } else {
       submissionFeedback.value = {
         success: false,
-        message: `Controller 返回 HTTP ${res.status}: ${bodyText}`
+        message: `Controller 返回 HTTP ${res.status}: ${res.rawBody || '未授权或连接失败'}`
       };
     }
   } catch (e: any) {
     submissionFeedback.value = {
       success: false,
-      message: `网络请求失败: ${e.message} (请检查 Controller 地址是否可达)`
+      message: `网络请求失败: ${e.message} (请检查 Controller 地址及证书配置)`
     };
   } finally {
     isSubmittingMission.value = false;

@@ -70,6 +70,29 @@ export interface TargetGoal {
   assignedDeviceId?: string;
 }
 
+export interface ClusterSecurityConfig {
+  clusterId: string;
+  nodeId: string;
+  nodeGrpcHost: string;
+  nodeGrpcPort: number;
+  operatorHttpsUrl: string;
+  artifactHttpsUrl: string;
+  tlsServerName?: string;
+  useMtls: boolean;
+
+  serverCaCertPem?: string;
+  nodeCertPem?: string;
+  nodeKeyPem?: string;
+  operatorCertPem?: string;
+  operatorKeyPem?: string;
+  operatorRole?: string;
+
+  nodeCertFingerprint?: string;
+  operatorCertFingerprint?: string;
+  hasNodeKey?: boolean;
+  hasOperatorKey?: boolean;
+}
+
 export interface ClarificationQuestion {
   id: string;
   question: string;

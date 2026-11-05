@@ -30,6 +30,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import javax.net.ssl.HttpsURLConnection;
 
 import io.grpc.ManagedChannel;
 import io.grpc.okhttp.OkHttpChannelBuilder;
@@ -69,6 +70,12 @@ public class PhoneNodeManager {
     public static synchronized PhoneNodeManager getInstance(Context context) {
         if (instance == null) {
             instance = new PhoneNodeManager(context.getApplicationContext());
+            if (context != null) {
+                instance.currentConfig = PhoneNodeConfig.load(context);
+                if (instance.currentConfig != null && instance.currentConfig.nodeId != null && !instance.currentConfig.nodeId.trim().isEmpty()) {
+                    instance.nodeId = instance.currentConfig.nodeId.trim();
+                }
+            }
             if (instance.journal != null) {
                 List<PhoneNodeJournal.ExecutionRecord> recovered = instance.journal.reconcileInterruptedExecutions();
                 if (!recovered.isEmpty()) {
@@ -119,6 +126,7 @@ public class PhoneNodeManager {
     private long heartbeatCount = 0;
     private final AtomicLong sequenceGenerator;
     private final AtomicBoolean isConnecting = new AtomicBoolean(false);
+    private PhoneNodeConfig currentConfig;
 
     private StatusListener statusListener;
 
@@ -195,12 +203,31 @@ public class PhoneNodeManager {
     }
 
     public synchronized void connect(String host, int port, int artifactPort) {
-        this.targetHost = host;
-        this.targetPort = port;
-        this.artifactPort = artifactPort;
+        PhoneNodeConfig cfg = this.currentConfig != null ? this.currentConfig : new PhoneNodeConfig();
+        cfg.nodeGrpcHost = host;
+        cfg.nodeGrpcPort = port;
+        cfg.artifactHttpsUrl = "http://" + host + ":" + artifactPort;
+        connectWithConfig(cfg);
+    }
+
+    public synchronized void connectWithConfig(PhoneNodeConfig config) {
+        this.currentConfig = config;
+        if (config.nodeGrpcHost != null && !config.nodeGrpcHost.isEmpty()) {
+            this.targetHost = config.nodeGrpcHost;
+        }
+        if (config.nodeGrpcPort > 0) {
+            this.targetPort = config.nodeGrpcPort;
+        }
+        if (config.nodeId != null && !config.nodeId.trim().isEmpty()) {
+            this.nodeId = config.nodeId.trim();
+        }
         this.autoReconnect = true;
         this.reconnectBackoffSeconds = 2;
         startSession();
+    }
+
+    public synchronized PhoneNodeConfig getCurrentConfig() {
+        return currentConfig;
     }
 
     public synchronized void disconnect() {
@@ -239,11 +266,33 @@ public class PhoneNodeManager {
                 channel.shutdownNow();
             }
 
-            channel = OkHttpChannelBuilder.forAddress(targetHost, targetPort)
-                    .usePlaintext()
+            OkHttpChannelBuilder builder = OkHttpChannelBuilder.forAddress(targetHost, targetPort)
                     .keepAliveTime(10, TimeUnit.SECONDS)
-                    .keepAliveTimeout(5, TimeUnit.SECONDS)
-                    .build();
+                    .keepAliveTimeout(5, TimeUnit.SECONDS);
+
+            if (currentConfig != null && currentConfig.useMtls) {
+                try {
+                    PhoneNodeSecurityHelper.SslBundle bundle = PhoneNodeSecurityHelper.buildSslBundle(
+                            currentConfig.serverCaCertPem,
+                            currentConfig.nodeCertPem,
+                            currentConfig.nodeKeyPem);
+                    builder.sslSocketFactory(bundle.socketFactory);
+                    if (currentConfig.tlsServerName != null && !currentConfig.tlsServerName.trim().isEmpty()) {
+                        builder.overrideAuthority(currentConfig.tlsServerName.trim());
+                    }
+                    Log.i(TAG, "Configured OkHttp channel with native mTLS for " + targetHost + ":" + targetPort);
+                } catch (Exception tlsEx) {
+                    Log.e(TAG, "Failed to initialize mTLS SSLContext, aborting connection", tlsEx);
+                    updateState(NodeState.ERROR, "mTLS initialization failed: " + tlsEx.getMessage());
+                    isConnecting.set(false);
+                    return;
+                }
+            } else {
+                builder.usePlaintext();
+                Log.i(TAG, "Configured OkHttp channel with plaintext (trusted loopback) for " + targetHost + ":" + targetPort);
+            }
+
+            channel = builder.build();
 
             RoboGuideNodeProtocolGrpc.RoboGuideNodeProtocolStub stub = RoboGuideNodeProtocolGrpc.newStub(channel);
 
@@ -794,6 +843,15 @@ public class PhoneNodeManager {
         }
     }
 
+    private void applyTlsToConnection(HttpURLConnection conn, PhoneNodeSecurityHelper.SslBundle bundle) {
+        if (conn instanceof HttpsURLConnection && bundle != null) {
+            ((HttpsURLConnection) conn).setSSLSocketFactory(bundle.socketFactory);
+            if (currentConfig != null && currentConfig.tlsServerName != null && !currentConfig.tlsServerName.trim().isEmpty()) {
+                ((HttpsURLConnection) conn).setHostnameVerifier((hostname, session) -> true);
+            }
+        }
+    }
+
     /**
      * Uploads captured artifact bytes to the formal Controller Artifact HTTP service and verifies CAS retrieval.
      */
@@ -802,11 +860,29 @@ public class PhoneNodeManager {
         journal.recordUploadIntent(uploadId, executionId, sha256Digest, sizeBytes, filePath);
 
         try {
-            String artifactBaseUrl = "http://" + targetHost + ":" + artifactPort;
+            String artifactBaseUrl;
+            if (currentConfig != null && currentConfig.artifactHttpsUrl != null && !currentConfig.artifactHttpsUrl.isEmpty()) {
+                artifactBaseUrl = currentConfig.artifactHttpsUrl.replaceAll("/+$", "");
+            } else {
+                artifactBaseUrl = "http://" + targetHost + ":" + artifactPort;
+            }
+
+            PhoneNodeSecurityHelper.SslBundle artifactSslBundle = null;
+            if (currentConfig != null && (currentConfig.useMtls || artifactBaseUrl.startsWith("https://"))) {
+                try {
+                    artifactSslBundle = PhoneNodeSecurityHelper.buildSslBundle(
+                            currentConfig.serverCaCertPem,
+                            currentConfig.nodeCertPem,
+                            currentConfig.nodeKeyPem);
+                } catch (Exception e) {
+                    Log.w(TAG, "Could not build Artifact client mTLS bundle: " + e.getMessage());
+                }
+            }
 
             // 1. POST /v1/artifact-uploads
             URL startUrl = new URL(artifactBaseUrl + "/v1/artifact-uploads");
             HttpURLConnection conn1 = (HttpURLConnection) startUrl.openConnection();
+            applyTlsToConnection(conn1, artifactSslBundle);
             conn1.setRequestMethod("POST");
             conn1.setRequestProperty("Content-Type", "application/json");
             conn1.setDoOutput(true);
@@ -827,6 +903,7 @@ public class PhoneNodeManager {
             // 2. POST /v1/artifact-uploads/{id}/content
             URL contentUrl = new URL(artifactBaseUrl + "/v1/artifact-uploads/" + uploadId + "/content");
             HttpURLConnection conn2 = (HttpURLConnection) contentUrl.openConnection();
+            applyTlsToConnection(conn2, artifactSslBundle);
             conn2.setRequestMethod("POST");
             conn2.setRequestProperty("Content-Type", "application/octet-stream");
             conn2.setDoOutput(true);
@@ -853,6 +930,7 @@ public class PhoneNodeManager {
             // 3. POST /v1/artifact-uploads/{id}/finalize
             URL finalizeUrl = new URL(artifactBaseUrl + "/v1/artifact-uploads/" + uploadId + "/finalize");
             HttpURLConnection conn3 = (HttpURLConnection) finalizeUrl.openConnection();
+            applyTlsToConnection(conn3, artifactSslBundle);
             conn3.setRequestMethod("POST");
             conn3.setRequestProperty("Content-Type", "application/json");
             conn3.setDoOutput(true);
@@ -873,6 +951,7 @@ public class PhoneNodeManager {
             // 4. Remote CAS Retrieval Verification: GET /v1/artifacts/{digest}
             URL verifyUrl = new URL(artifactBaseUrl + "/v1/artifacts/" + sha256Digest);
             HttpURLConnection connVerify = (HttpURLConnection) verifyUrl.openConnection();
+            applyTlsToConnection(connVerify, artifactSslBundle);
             connVerify.setRequestMethod("GET");
             connVerify.setConnectTimeout(3000);
             connVerify.setReadTimeout(10000);

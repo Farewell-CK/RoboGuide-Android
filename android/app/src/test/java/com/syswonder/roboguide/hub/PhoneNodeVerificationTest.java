@@ -2,12 +2,15 @@ package com.syswonder.roboguide.hub;
 
 import org.junit.Test;
 import static org.junit.Assert.*;
+import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.FileInputStream;
+import java.security.KeyPair;
 import java.security.MessageDigest;
+import java.security.PrivateKey;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -540,5 +543,72 @@ public class PhoneNodeVerificationTest {
             assertTrue("Exception must relate to Android Bitmap graphics stub",
                     e.getMessage() != null && (e.getMessage().contains("Bitmap") || e.getMessage().contains("not mocked")));
         }
+    }
+
+    // =========================================================================
+    // 8. Native PKI, mTLS & Security Configuration
+    // =========================================================================
+
+    @Test
+    public void testEcKeyPairGenerationAndPemParsing() throws Exception {
+        KeyPair kp = PhoneNodeSecurityHelper.generateDeviceKeyPair("EC");
+        assertNotNull(kp);
+        assertNotNull(kp.getPublic());
+        assertNotNull(kp.getPrivate());
+
+        String privPem = PhoneNodeSecurityHelper.exportPrivateKeyToPem(kp.getPrivate());
+        assertTrue(privPem.contains("-----BEGIN PRIVATE KEY-----"));
+        assertTrue(privPem.contains("-----END PRIVATE KEY-----"));
+
+        String pubPem = PhoneNodeSecurityHelper.exportPublicKeyToPem(kp.getPublic());
+        assertTrue(pubPem.contains("-----BEGIN PUBLIC KEY-----"));
+        assertTrue(pubPem.contains("-----END PUBLIC KEY-----"));
+
+        PrivateKey reloadedKey = PhoneNodeSecurityHelper.parsePrivateKey(privPem);
+        assertNotNull(reloadedKey);
+        assertEquals("EC", reloadedKey.getAlgorithm());
+    }
+
+    @Test
+    public void testRsaKeyPairGenerationAndPemParsing() throws Exception {
+        KeyPair kp = PhoneNodeSecurityHelper.generateDeviceKeyPair("RSA");
+        assertNotNull(kp);
+        assertNotNull(kp.getPublic());
+        assertNotNull(kp.getPrivate());
+
+        String privPem = PhoneNodeSecurityHelper.exportPrivateKeyToPem(kp.getPrivate());
+        assertTrue(privPem.contains("-----BEGIN PRIVATE KEY-----"));
+
+        PrivateKey reloadedKey = PhoneNodeSecurityHelper.parsePrivateKey(privPem);
+        assertNotNull(reloadedKey);
+        assertEquals("RSA", reloadedKey.getAlgorithm());
+    }
+
+    @Test
+    public void testPhoneNodeConfigSerialization() throws Exception {
+        PhoneNodeConfig cfg = new PhoneNodeConfig();
+        cfg.clusterId = "rg-cluster-unit-test";
+        cfg.nodeId = "phone-node-unit-test-1";
+        cfg.nodeGrpcHost = "192.168.2.20";
+        cfg.nodeGrpcPort = 50051;
+        cfg.operatorHttpsUrl = "https://192.168.2.20:8080";
+        cfg.artifactHttpsUrl = "https://192.168.2.20:8090";
+        cfg.useMtls = true;
+        cfg.operatorRole = "operator";
+
+        JSONObject json = cfg.toJson(true);
+        assertEquals("rg-cluster-unit-test", json.getString("clusterId"));
+        assertEquals("phone-node-unit-test-1", json.getString("nodeId"));
+        assertEquals(50051, json.getInt("nodeGrpcPort"));
+        assertTrue(json.getBoolean("useMtls"));
+
+        PhoneNodeConfig restored = PhoneNodeConfig.fromJson(json);
+        assertEquals(cfg.clusterId, restored.clusterId);
+        assertEquals(cfg.nodeId, restored.nodeId);
+        assertEquals(cfg.nodeGrpcHost, restored.nodeGrpcHost);
+        assertEquals(cfg.nodeGrpcPort, restored.nodeGrpcPort);
+        assertEquals(cfg.operatorHttpsUrl, restored.operatorHttpsUrl);
+        assertEquals(cfg.artifactHttpsUrl, restored.artifactHttpsUrl);
+        assertTrue(restored.useMtls);
     }
 }
