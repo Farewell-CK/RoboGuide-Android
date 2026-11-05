@@ -11,6 +11,7 @@ export interface EnvProfileConfig {
   description: string;
   controllerEndpoint: string;
   videoStreamBaseUrl: string;
+  artifactPort?: number;
   isSimulated: boolean;
 }
 

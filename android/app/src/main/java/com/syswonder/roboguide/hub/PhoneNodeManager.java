@@ -17,6 +17,8 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -67,6 +69,12 @@ public class PhoneNodeManager {
     public static synchronized PhoneNodeManager getInstance(Context context) {
         if (instance == null) {
             instance = new PhoneNodeManager(context.getApplicationContext());
+            if (instance.journal != null) {
+                List<PhoneNodeJournal.ExecutionRecord> recovered = instance.journal.reconcileInterruptedExecutions();
+                if (!recovered.isEmpty()) {
+                    Log.i(TAG, "Process restart recovery reconciled " + recovered.size() + " in-flight executions to UNKNOWN/COMPLETED");
+                }
+            }
         }
         return instance;
     }
@@ -123,8 +131,19 @@ public class PhoneNodeManager {
         Log.i(TAG, "Initialized PhoneNodeManager: nodeId=" + nodeId + ", initialSequence=" + sequenceGenerator.get());
     }
 
+    public List<PhoneNodeJournal.ExecutionRecord> recoverInterruptedExecutions() {
+        if (journal != null) {
+            return journal.reconcileInterruptedExecutions();
+        }
+        return Collections.emptyList();
+    }
+
     private PhoneNodeManager(Context context) {
         this(context, PhoneNodeJournal.getInstance(context));
+    }
+
+    public synchronized long getSequence() {
+        return sequenceGenerator.get();
     }
 
     public void setStatusListener(StatusListener listener) {
@@ -469,8 +488,7 @@ public class PhoneNodeManager {
         updateState(NodeState.STREAMING, "Registered (session=" + sessionId + ")");
         Log.i(TAG, "Registration accepted: session=" + sessionId + ", lease=" + leaseId);
 
-        // Reconcile durable state with Controller across restarts / reconnects
-        journal.reconcileInterruptedExecutions();
+        // Replay durable execution snapshots to Controller for session reconciliation
         replaySnapshots();
 
         startHeartbeatLoop();
@@ -857,11 +875,49 @@ public class PhoneNodeManager {
             HttpURLConnection connVerify = (HttpURLConnection) verifyUrl.openConnection();
             connVerify.setRequestMethod("GET");
             connVerify.setConnectTimeout(3000);
-            connVerify.setReadTimeout(5000);
+            connVerify.setReadTimeout(10000);
             int verifyCode = connVerify.getResponseCode();
-            connVerify.disconnect();
-            if (verifyCode != 200 && verifyCode != 204) {
+            if (verifyCode != 200) {
                 Log.w(TAG, "Remote CAS retrieval verification failed with HTTP " + verifyCode);
+                connVerify.disconnect();
+                journal.updateUploadProgress(uploadId, "FAILED", bytesUploaded);
+                return false;
+            }
+
+            long remoteBytesRead = 0;
+            MessageDigest readDigest = MessageDigest.getInstance("SHA-256");
+            try (InputStream is = connVerify.getInputStream()) {
+                byte[] vBuf = new byte[8192];
+                int n;
+                long maxAllowed = Math.max(sizeBytes + 1024 * 1024, 10 * 1024 * 1024);
+                while ((n = is.read(vBuf)) != -1) {
+                    remoteBytesRead += n;
+                    if (remoteBytesRead > maxAllowed) {
+                        Log.w(TAG, "Remote CAS artifact exceeds expected size limit");
+                        connVerify.disconnect();
+                        journal.updateUploadProgress(uploadId, "FAILED", bytesUploaded);
+                        return false;
+                    }
+                    readDigest.update(vBuf, 0, n);
+                }
+            } finally {
+                connVerify.disconnect();
+            }
+
+            if (remoteBytesRead == 0 || remoteBytesRead != sizeBytes) {
+                Log.w(TAG, "Remote CAS artifact size mismatch: expected=" + sizeBytes + ", read=" + remoteBytesRead);
+                journal.updateUploadProgress(uploadId, "FAILED", bytesUploaded);
+                return false;
+            }
+
+            StringBuilder sb = new StringBuilder("sha256:");
+            for (byte b : readDigest.digest()) {
+                sb.append(String.format("%02x", b));
+            }
+            String downloadedDigest = sb.toString();
+
+            if (!sha256Digest.equalsIgnoreCase(downloadedDigest)) {
+                Log.w(TAG, "Remote CAS artifact digest mismatch: expected=" + sha256Digest + ", downloaded=" + downloadedDigest);
                 journal.updateUploadProgress(uploadId, "FAILED", bytesUploaded);
                 return false;
             }
@@ -953,6 +1009,7 @@ public class PhoneNodeManager {
         if ("COMPLETED".equalsIgnoreCase(name)) return RoboguideNode.ExecutionPhase.COMPLETED;
         if ("FAILED".equalsIgnoreCase(name)) return RoboguideNode.ExecutionPhase.FAILED;
         if ("CANCELLED".equalsIgnoreCase(name)) return RoboguideNode.ExecutionPhase.CANCELLED;
+        if ("UNKNOWN".equalsIgnoreCase(name)) return RoboguideNode.ExecutionPhase.UNKNOWN;
         return RoboguideNode.ExecutionPhase.EXECUTION_PHASE_UNSPECIFIED;
     }
 }

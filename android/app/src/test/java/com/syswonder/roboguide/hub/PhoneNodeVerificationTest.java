@@ -372,6 +372,7 @@ public class PhoneNodeVerificationTest {
         // Sequence restored correctly without regression
         assertTrue("Sequence must start strictly greater than max persisted sequence",
                 mgr.getNodeId() != null);
+        assertEquals(88L, mgr.getSequence());
     }
 
     @Test
@@ -396,14 +397,14 @@ public class PhoneNodeVerificationTest {
         // Completed task remains untouched
         assertEquals("COMPLETED", journal.getExecution("task-a").phase);
 
-        // Interrupted tasks reconciled to FAILED with clear audit trail
+        // Interrupted tasks reconciled to UNKNOWN with clear audit trail (never asserted FAILED without proof)
         PhoneNodeJournal.ExecutionRecord b = journal.getExecution("task-b");
-        assertEquals("FAILED", b.phase);
-        assertTrue(b.reason.contains("E_INTERRUPTED_BY_RESTART"));
+        assertEquals("UNKNOWN", b.phase);
+        assertTrue(b.reason.contains("E_PROCESS_RESTART_UNVERIFIED"));
 
         PhoneNodeJournal.ExecutionRecord c = journal.getExecution("task-c");
-        assertEquals("FAILED", c.phase);
-        assertTrue(c.reason.contains("E_INTERRUPTED_BY_RESTART"));
+        assertEquals("UNKNOWN", c.phase);
+        assertTrue(c.reason.contains("E_PROCESS_RESTART_UNVERIFIED"));
     }
 
     // =========================================================================

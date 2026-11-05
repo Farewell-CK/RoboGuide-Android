@@ -10,6 +10,7 @@ import android.util.Log;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -122,7 +123,7 @@ public class PhoneNodeJournal {
     public static boolean isTerminalPhase(String phase) {
         if (phase == null) return false;
         String p = phase.trim().toUpperCase();
-        return "COMPLETED".equals(p) || "FAILED".equals(p) || "CANCELLED".equals(p);
+        return "COMPLETED".equals(p) || "FAILED".equals(p) || "CANCELLED".equals(p) || "UNKNOWN".equals(p);
     }
 
     // Storage Backend Interface
@@ -356,7 +357,26 @@ public class PhoneNodeJournal {
             SQLiteDatabase db = getWritableDatabase();
             db.beginTransaction();
             try {
-                // 1. Check if cancel intent arrived first
+                // 1. Check if execution record already exists FIRST
+                ExecutionRecord existing = getExecutionLocked(db, executionId);
+                if (existing != null) {
+                    boolean opMatches = (existing.operation == null && operation == null) ||
+                            (existing.operation != null && existing.operation.equals(operation));
+                    boolean paramMatches = (existing.parametersJson == null && paramsJson == null) ||
+                            (existing.parametersJson != null && existing.parametersJson.equals(paramsJson));
+
+                    if (opMatches && paramMatches) {
+                        db.setTransactionSuccessful();
+                        return new AdmissionResult(AdmissionStatus.DUPLICATE, existing, "Idempotent duplicate submission");
+                    } else {
+                        // Conflict: altered parameters. Do NOT mutate original record!
+                        db.setTransactionSuccessful();
+                        return new AdmissionResult(AdmissionStatus.CONFLICT, existing,
+                                "E_PARAMETER_CONFLICT: Execution parameters differ from originally accepted submission");
+                    }
+                }
+
+                // 2. Not previously admitted: Check if cancellation intent arrived first (Pre-Cancel)
                 Cursor cancelCursor = db.query("cancellation_intents", new String[]{"reason"},
                         "execution_id = ?", new String[]{executionId}, null, null, null);
                 boolean preCancelled = false;
@@ -384,29 +404,11 @@ public class PhoneNodeJournal {
                     cv.put("created_at_ms", now);
                     cv.put("updated_at_ms", now);
                     db.insertWithOnConflict("executions", null, cv, SQLiteDatabase.CONFLICT_IGNORE);
+                    db.delete("cancellation_intents", "execution_id = ?", new String[]{executionId});
 
                     db.setTransactionSuccessful();
                     ExecutionRecord rec = getExecutionLocked(db, executionId);
                     return new AdmissionResult(AdmissionStatus.PRE_CANCELLED, rec, cancelReason);
-                }
-
-                // 2. Check if execution record already exists
-                ExecutionRecord existing = getExecutionLocked(db, executionId);
-                if (existing != null) {
-                    boolean opMatches = (existing.operation == null && operation == null) ||
-                            (existing.operation != null && existing.operation.equals(operation));
-                    boolean paramMatches = (existing.parametersJson == null && paramsJson == null) ||
-                            (existing.parametersJson != null && existing.parametersJson.equals(paramsJson));
-
-                    if (opMatches && paramMatches) {
-                        db.setTransactionSuccessful();
-                        return new AdmissionResult(AdmissionStatus.DUPLICATE, existing, "Idempotent duplicate submission");
-                    } else {
-                        // Conflict: altered parameters. Do NOT mutate original record!
-                        db.setTransactionSuccessful();
-                        return new AdmissionResult(AdmissionStatus.CONFLICT, existing,
-                                "E_PARAMETER_CONFLICT: Execution parameters differ from originally accepted submission");
-                    }
                 }
 
                 // 3. Fresh task admission
@@ -437,7 +439,31 @@ public class PhoneNodeJournal {
             db.beginTransaction();
             try {
                 long now = System.currentTimeMillis();
-                // 1. Record cancel intent
+                // 1. Check existing execution FIRST
+                ExecutionRecord existing = getExecutionLocked(db, executionId);
+                if (existing != null) {
+                    // Stale cancellation_intents should not linger if execution already exists
+                    db.delete("cancellation_intents", "execution_id = ?", new String[]{executionId});
+
+                    if (isTerminalPhase(existing.phase)) {
+                        // Monotonic terminal state
+                        db.setTransactionSuccessful();
+                        return new CancelResult(CancelStatus.ALREADY_TERMINAL, existing.phase,
+                                "Task already in terminal phase " + existing.phase + "; terminal state preserved");
+                    }
+
+                    // Cancel active task (ACCEPTED or STARTED)
+                    ContentValues cv = new ContentValues();
+                    cv.put("phase", "CANCELLED");
+                    cv.put("reason", reason);
+                    cv.put("updated_at_ms", now);
+                    db.update("executions", cv, "execution_id = ?", new String[]{executionId});
+
+                    db.setTransactionSuccessful();
+                    return new CancelResult(CancelStatus.CANCELLED_ACTIVE, "CANCELLED", reason);
+                }
+
+                // 2. Execution does not exist yet: Record pre-cancel intent
                 ContentValues intentCv = new ContentValues();
                 intentCv.put("execution_id", executionId);
                 intentCv.put("command_id", commandId);
@@ -445,29 +471,8 @@ public class PhoneNodeJournal {
                 intentCv.put("created_at_ms", now);
                 db.insertWithOnConflict("cancellation_intents", null, intentCv, SQLiteDatabase.CONFLICT_REPLACE);
 
-                // 2. Query execution
-                ExecutionRecord existing = getExecutionLocked(db, executionId);
-                if (existing == null) {
-                    db.setTransactionSuccessful();
-                    return new CancelResult(CancelStatus.RECORDED_PRE_CANCEL, null, "Cancellation intent recorded prior to execution admission");
-                }
-
-                // 3. Monotonic terminal state
-                if (isTerminalPhase(existing.phase)) {
-                    db.setTransactionSuccessful();
-                    return new CancelResult(CancelStatus.ALREADY_TERMINAL, existing.phase,
-                            "Task already in terminal phase " + existing.phase + "; terminal state preserved");
-                }
-
-                // 4. Cancel active task
-                ContentValues cv = new ContentValues();
-                cv.put("phase", "CANCELLED");
-                cv.put("reason", reason);
-                cv.put("updated_at_ms", now);
-                db.update("executions", cv, "execution_id = ?", new String[]{executionId});
-
                 db.setTransactionSuccessful();
-                return new CancelResult(CancelStatus.CANCELLED_ACTIVE, "CANCELLED", reason);
+                return new CancelResult(CancelStatus.RECORDED_PRE_CANCEL, null, "Cancellation intent recorded prior to execution admission");
             } finally {
                 db.endTransaction();
             }
@@ -616,10 +621,23 @@ public class PhoneNodeJournal {
                     long now = System.currentTimeMillis();
                     while (cursor.moveToNext()) {
                         String id = cursor.getString(cursor.getColumnIndexOrThrow("execution_id"));
-                        String err = "E_INTERRUPTED_BY_RESTART: Process restarted before task reached terminal phase; reconciliation required";
+                        UploadRecord u = getUploadRecordByExecution(id);
+                        boolean canRecover = false;
+                        if (u != null && "COMPLETED".equals(u.phase) && u.filePath != null) {
+                            File f = new File(u.filePath);
+                            if (f.exists() && f.length() == u.byteSize && u.byteSize > 0) {
+                                canRecover = true;
+                            }
+                        }
+
                         ContentValues cv = new ContentValues();
-                        cv.put("phase", "FAILED");
-                        cv.put("reason", err);
+                        if (canRecover) {
+                            cv.put("phase", "COMPLETED");
+                            cv.put("reason", "Recovered from verified durable artifact receipt across restart");
+                        } else {
+                            cv.put("phase", "UNKNOWN");
+                            cv.put("reason", "E_PROCESS_RESTART_UNVERIFIED: Process terminated while task was active; outcome unverified");
+                        }
                         cv.put("updated_at_ms", now);
                         db.update("executions", cv, "execution_id = ?", new String[]{id});
 
@@ -764,25 +782,7 @@ public class PhoneNodeJournal {
         @Override
         public AdmissionResult atomicAdmitExecution(String executionId, String commandId, String sessionId, String operation, String paramsJson) {
             synchronized (lock) {
-                // 1. Check pre-cancel
-                if (cancellationIntents.containsKey(executionId)) {
-                    String cancelReason = cancellationIntents.get(executionId);
-                    long now = System.currentTimeMillis();
-                    ExecutionRecord r = new ExecutionRecord();
-                    r.executionId = executionId;
-                    r.commandId = commandId;
-                    r.sessionId = sessionId;
-                    r.operation = operation;
-                    r.parametersJson = paramsJson;
-                    r.phase = "CANCELLED";
-                    r.reason = cancelReason;
-                    r.createdAtMs = now;
-                    r.updatedAtMs = now;
-                    executions.put(executionId, r);
-                    return new AdmissionResult(AdmissionStatus.PRE_CANCELLED, r.copy(), cancelReason);
-                }
-
-                // 2. Check existing
+                // 1. Check existing execution FIRST
                 ExecutionRecord existing = executions.get(executionId);
                 if (existing != null) {
                     boolean opMatches = (existing.operation == null && operation == null) ||
@@ -799,7 +799,25 @@ public class PhoneNodeJournal {
                     }
                 }
 
-                // 3. New record
+                // 2. Not previously admitted: Check pre-cancel
+                if (cancellationIntents.containsKey(executionId)) {
+                    String cancelReason = cancellationIntents.remove(executionId);
+                    long now = System.currentTimeMillis();
+                    ExecutionRecord r = new ExecutionRecord();
+                    r.executionId = executionId;
+                    r.commandId = commandId;
+                    r.sessionId = sessionId;
+                    r.operation = operation;
+                    r.parametersJson = paramsJson;
+                    r.phase = "CANCELLED";
+                    r.reason = cancelReason;
+                    r.createdAtMs = now;
+                    r.updatedAtMs = now;
+                    executions.put(executionId, r);
+                    return new AdmissionResult(AdmissionStatus.PRE_CANCELLED, r.copy(), cancelReason);
+                }
+
+                // 3. Fresh task admission
                 long now = System.currentTimeMillis();
                 ExecutionRecord r = new ExecutionRecord();
                 r.executionId = executionId;
@@ -819,21 +837,24 @@ public class PhoneNodeJournal {
         @Override
         public CancelResult atomicCancelExecution(String executionId, String commandId, String reason) {
             synchronized (lock) {
-                cancellationIntents.put(executionId, reason);
+                // 1. Check existing execution FIRST
                 ExecutionRecord existing = executions.get(executionId);
-                if (existing == null) {
-                    return new CancelResult(CancelStatus.RECORDED_PRE_CANCEL, null, "Cancellation intent recorded prior to execution admission");
+                if (existing != null) {
+                    cancellationIntents.remove(executionId);
+                    if (isTerminalPhase(existing.phase)) {
+                        return new CancelResult(CancelStatus.ALREADY_TERMINAL, existing.phase,
+                                "Task already in terminal phase " + existing.phase + "; terminal state preserved");
+                    }
+
+                    existing.phase = "CANCELLED";
+                    existing.reason = reason;
+                    existing.updatedAtMs = System.currentTimeMillis();
+                    return new CancelResult(CancelStatus.CANCELLED_ACTIVE, "CANCELLED", reason);
                 }
 
-                if (isTerminalPhase(existing.phase)) {
-                    return new CancelResult(CancelStatus.ALREADY_TERMINAL, existing.phase,
-                            "Task already in terminal phase " + existing.phase + "; terminal state preserved");
-                }
-
-                existing.phase = "CANCELLED";
-                existing.reason = reason;
-                existing.updatedAtMs = System.currentTimeMillis();
-                return new CancelResult(CancelStatus.CANCELLED_ACTIVE, "CANCELLED", reason);
+                // 2. Not admitted yet: Record pre-cancel intent
+                cancellationIntents.put(executionId, reason);
+                return new CancelResult(CancelStatus.RECORDED_PRE_CANCEL, null, "Cancellation intent recorded prior to execution admission");
             }
         }
 
@@ -935,8 +956,22 @@ public class PhoneNodeJournal {
                 long now = System.currentTimeMillis();
                 for (ExecutionRecord r : executions.values()) {
                     if ("ACCEPTED".equalsIgnoreCase(r.phase) || "STARTED".equalsIgnoreCase(r.phase)) {
-                        r.phase = "FAILED";
-                        r.reason = "E_INTERRUPTED_BY_RESTART: Process restarted before task reached terminal phase; reconciliation required";
+                        UploadRecord u = getUploadRecordByExecution(r.executionId);
+                        boolean canRecover = false;
+                        if (u != null && "COMPLETED".equals(u.phase) && u.filePath != null) {
+                            File f = new File(u.filePath);
+                            if (f.exists() && f.length() == u.byteSize && u.byteSize > 0) {
+                                canRecover = true;
+                            }
+                        }
+
+                        if (canRecover) {
+                            r.phase = "COMPLETED";
+                            r.reason = "Recovered from verified durable artifact receipt across restart";
+                        } else {
+                            r.phase = "UNKNOWN";
+                            r.reason = "E_PROCESS_RESTART_UNVERIFIED: Process terminated while task was active; outcome unverified";
+                        }
                         r.updatedAtMs = now;
                         interrupted.add(r.copy());
                     }

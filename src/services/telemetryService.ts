@@ -1,6 +1,7 @@
 import { reactive } from 'vue';
 import type { 
   DeviceTelemetry, 
+  CapabilitySummary,
   ActiveMission, 
   MapData, 
   EnvProfileType, 
@@ -44,6 +45,7 @@ const DEFAULT_PROFILES: Record<EnvProfileType, EnvProfileConfig> = {
     description: '通过 gRPC NodeSession 与 HTTP Control Plane 正式接入 RoboGuide',
     controllerEndpoint: 'http://127.0.0.1:8080',
     videoStreamBaseUrl: 'http://127.0.0.1:8092',
+    artifactPort: 8090,
     isSimulated: false
   },
   isaac_sim: {
@@ -53,6 +55,7 @@ const DEFAULT_PROFILES: Record<EnvProfileType, EnvProfileConfig> = {
     description: 'NVIDIA Isaac Lab 园区数字孪生演示: 双足狗编队 + 电动叉车 (离线仿真)',
     controllerEndpoint: 'http://127.0.0.1:8080',
     videoStreamBaseUrl: 'http://127.0.0.1:8095',
+    artifactPort: 8090,
     isSimulated: true
   },
   standalone_thor2: {
@@ -62,6 +65,7 @@ const DEFAULT_PROFILES: Record<EnvProfileType, EnvProfileConfig> = {
     description: '直连机载端 Robonix WebUI 端口 (127.0.0.1:8092)',
     controllerEndpoint: 'http://127.0.0.1:8092',
     videoStreamBaseUrl: 'http://127.0.0.1:8092',
+    artifactPort: 8090,
     isSimulated: false
   },
   custom: {
@@ -71,6 +75,7 @@ const DEFAULT_PROFILES: Record<EnvProfileType, EnvProfileConfig> = {
     description: '手动指定局域网或 WSL DEAIOS Controller IP 与端口',
     controllerEndpoint: 'http://127.0.0.1:8080',
     videoStreamBaseUrl: 'http://127.0.0.1:8095',
+    artifactPort: 8090,
     isSimulated: false
   }
 };
@@ -231,7 +236,7 @@ export async function connectNativeNode() {
   try {
     const { host } = parseHostAndPort(swarmState.controllerEndpoint);
     const grpcPort = swarmState.grpcPort || 50051;
-    const artifactPort = 8090;
+    const artifactPort = swarmState.profiles[swarmState.currentProfile]?.artifactPort || 8090;
     await PhoneNode.connect({ host, port: grpcPort, artifactPort });
     await refreshNodeStatus();
   } catch (e) {
@@ -289,52 +294,81 @@ export async function fetchControllerInventory() {
           const isDog = node.node_id?.includes('dog') || node.node_id?.includes('thor');
           
           // Formal RG Inventory Contract: reported_health ("Online" | "Degraded" | "Offline" | "SafeStopped")
-          // and liveness ("Reachable" | "Unreachable")
+          // and liveness ("Reachable" | "Unreachable") are independent facts.
           let devStatus: 'ONLINE' | 'BUSY' | 'IDLE' | 'OFFLINE' | 'ESTOP' = 'OFFLINE';
           const rh = String(node.reported_health || node.status || '').toLowerCase();
           const liveness = String(node.liveness || '').toLowerCase();
 
+          // SafeStopped takes absolute precedence: ESTOP
           if (rh === 'safestopped' || rh === 'estop') {
             devStatus = 'ESTOP';
+          } else if (liveness === 'unreachable') {
+            // Unreachable means communication lost; cannot be displayed as ONLINE regardless of stale health report
+            devStatus = 'OFFLINE';
           } else if (rh === 'degraded' || rh === 'busy') {
             devStatus = 'BUSY';
           } else if (rh === 'online' || rh === 'healthy') {
-            devStatus = 'ONLINE';
-          } else if (liveness === 'reachable' && rh !== 'offline') {
             devStatus = 'ONLINE';
           } else {
             devStatus = 'OFFLINE';
           }
 
-          // Parse capabilities and contracts according to RG inventory v0.1 schema
-          let caps: any[] = [];
-          if (Array.isArray(node.capabilities)) {
-            caps = node.capabilities.map((c: any, idx: number) => {
-              const contract = Array.isArray(node.contracts) && node.contracts[idx] ? node.contracts[idx] : `${c.kind || 'capability'}@v1`;
-              const kindUpper = c.kind ? (c.kind.charAt(0).toUpperCase() + c.kind.slice(1)) : 'Compute';
-              return {
-                kind: kindUpper,
-                contract: contract,
-                detail: `Available: ${c.available}`,
-                available: Boolean(c.available)
-              };
-            });
-          } else if (Array.isArray(node.capability_profiles)) {
+          // Parse capabilities (categories) and contracts (concrete interfaces) independently
+          let caps: CapabilitySummary[] = [];
+
+          if (Array.isArray(node.capability_profiles)) {
+            // Explicit profiles from gRPC where each entry directly binds contract and kind
             caps = node.capability_profiles.map((cp: any) => {
               const kindUpper = cp.kind ? (cp.kind.charAt(0).toUpperCase() + cp.kind.slice(1)) : 'Compute';
               return {
-                kind: kindUpper,
+                kind: kindUpper as any,
                 contract: cp.contract || 'unknown',
                 detail: `Ready: ${cp.ready}`,
                 available: Boolean(cp.ready)
               };
             });
+          } else {
+            // RG Inventory v0.1: capabilities (categories) and contracts are independent arrays
+            if (Array.isArray(node.capabilities)) {
+              for (const c of node.capabilities) {
+                const kindUpper = c.kind ? (c.kind.charAt(0).toUpperCase() + c.kind.slice(1)) : 'Compute';
+                caps.push({
+                  kind: kindUpper as any,
+                  contract: `category:${c.kind}`,
+                  detail: `Category: ${c.kind} (${c.available ? 'available' : 'unavailable'})`,
+                  available: Boolean(c.available)
+                });
+              }
+            }
+
+            if (Array.isArray(node.contracts)) {
+              for (const contractStr of node.contracts) {
+                let inferredKind = 'Compute';
+                if (contractStr.startsWith('observation.') || contractStr.startsWith('sensor.')) {
+                  inferredKind = 'Observation';
+                } else if (contractStr.startsWith('mobility.')) {
+                  inferredKind = 'Mobility';
+                } else if (contractStr.startsWith('transport.')) {
+                  inferredKind = 'Transport';
+                }
+                caps.push({
+                  kind: inferredKind as any,
+                  contract: contractStr,
+                  detail: 'Registered contract',
+                  available: true
+                });
+              }
+            }
           }
 
           // Pose: only present if genuine coordinates are provided by localization; otherwise leave undefined (Unknown)
           const genuinePose = (node.pose && typeof node.pose.x === 'number' && !isNaN(node.pose.x))
             ? { x: node.pose.x, y: node.pose.y, theta: node.pose.theta || 0 }
             : undefined;
+
+          const modeDisplay = node.reported_health
+            ? `${node.reported_health} (${node.liveness || 'Unknown'})`
+            : (node.status || 'unknown');
 
           return {
             id: node.node_id || 'unknown-node',
@@ -345,7 +379,7 @@ export async function fetchControllerInventory() {
             ip: node.endpoint || 'N/A',
             batteryPercent: undefined,
             pose: genuinePose,
-            currentMode: node.reported_health || node.status || 'unknown',
+            currentMode: modeDisplay,
             hasActiveMap: false,
             capabilities: caps
           };
