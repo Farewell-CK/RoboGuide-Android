@@ -73,6 +73,18 @@ public class PhoneNodePlugin extends Plugin {
                 notifyListeners("executionEvent", data);
             }
         });
+
+        // Auto-connect on plugin load if persisted mTLS credentials exist
+        try {
+            PhoneNodeConfig savedCfg = PhoneNodeConfig.load(getContext());
+            if (savedCfg != null && savedCfg.useMtls
+                    && savedCfg.nodeCertPem != null && !savedCfg.nodeCertPem.trim().isEmpty()
+                    && savedCfg.nodeKeyPem != null && !savedCfg.nodeKeyPem.trim().isEmpty()) {
+                if (manager.getState() == PhoneNodeManager.NodeState.DISCONNECTED) {
+                    manager.connectWithConfig(savedCfg);
+                }
+            }
+        } catch (Throwable ignored) {}
     }
 
     @PluginMethod

@@ -233,12 +233,18 @@ public class PhoneNodeManager {
     public synchronized void disconnect() {
         this.autoReconnect = false;
         closeSession("Disconnected by user");
+        PhoneNodeForegroundService.stop(this.context);
     }
 
     private synchronized void updateState(NodeState newState, String detail) {
         this.currentState = newState;
         this.currentDetail = detail;
         Log.i(TAG, "State -> " + newState + " (" + detail + ")");
+        if (newState == NodeState.CONNECTING || newState == NodeState.REGISTERED || newState == NodeState.STREAMING) {
+            PhoneNodeForegroundService.startOrUpdate(this.context, this.nodeId, newState.name(), detail);
+        } else if (newState == NodeState.DISCONNECTED && !this.autoReconnect) {
+            PhoneNodeForegroundService.stop(this.context);
+        }
         if (statusListener != null) {
             Handler h = getMainHandler();
             if (h != null) {
