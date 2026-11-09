@@ -160,9 +160,11 @@ function sendCmd(vx: number, vtheta: number) {
   device.value.angularVelocity = vtheta;
 
   // Advance pose slightly for instant feedback
-  device.value.pose.x += vx * 0.1 * Math.cos(device.value.pose.theta);
-  device.value.pose.y += vx * 0.1 * Math.sin(device.value.pose.theta);
-  device.value.pose.theta += vtheta * 0.1;
+  if (device.value.pose) {
+    device.value.pose.x += vx * 0.1 * Math.cos(device.value.pose.theta);
+    device.value.pose.y += vx * 0.1 * Math.sin(device.value.pose.theta);
+    device.value.pose.theta += vtheta * 0.1;
+  }
 }
 
 function getDeviceIcon(kind: DeviceKind) {

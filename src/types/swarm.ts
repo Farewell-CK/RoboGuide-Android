@@ -11,6 +11,7 @@ export interface EnvProfileConfig {
   description: string;
   controllerEndpoint: string;
   videoStreamBaseUrl: string;
+  artifactPort?: number;
   isSimulated: boolean;
 }
 
@@ -29,9 +30,9 @@ export interface DeviceTelemetry {
   status: DeviceStatus;
   ip: string;
   tailscaleIp?: string;
-  batteryPercent: number;
+  batteryPercent?: number;
   batteryVoltage?: number;
-  pose: {
+  pose?: {
     x: number;
     y: number;
     theta: number; // yaw in radians
@@ -67,6 +68,31 @@ export interface TargetGoal {
   y: number;
   label?: string;
   assignedDeviceId?: string;
+}
+
+export interface ClusterSecurityConfig {
+  clusterId: string;
+  nodeId: string;
+  nodeGrpcHost: string;
+  nodeGrpcPort: number;
+  operatorHttpsUrl: string;
+  artifactHttpsUrl: string;
+  tlsServerName?: string;
+  operatorTlsServerName?: string;
+  useMtls: boolean;
+
+  serverCaCertPem?: string;
+  operatorCaCertPem?: string;
+  nodeCertPem?: string;
+  nodeKeyPem?: string;
+  operatorCertPem?: string;
+  operatorKeyPem?: string;
+  operatorRole?: string;
+
+  nodeCertFingerprint?: string;
+  operatorCertFingerprint?: string;
+  hasNodeKey?: boolean;
+  hasOperatorKey?: boolean;
 }
 
 export interface ClarificationQuestion {

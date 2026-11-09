@@ -54,7 +54,7 @@
 
         <!-- Bottom Compass Pitch/Roll Tape -->
         <div class="self-center bg-slate-950/70 border border-slate-700/80 px-4 py-1 rounded-full text-[10px] font-mono text-slate-300">
-          YAW: {{ ((targetDevice?.pose.theta || 0) * (180 / Math.PI)).toFixed(1) }}° | PITCH: 0.2° | ROLL: -0.1°
+          YAW: {{ (((targetDevice?.pose?.theta) || 0) * (180 / Math.PI)).toFixed(1) }}° | PITCH: 0.2° | ROLL: -0.1°
         </div>
       </div>
     </div>

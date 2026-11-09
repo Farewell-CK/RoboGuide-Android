@@ -199,6 +199,7 @@ function handleCanvasTap(screenX: number, screenY: number) {
   // Check if tap hit any device within 25px
   let clickedDevice: string | null = null;
   for (const d of swarmState.devices) {
+    if (!d.pose) continue;
     const s = worldToScreen(d.pose.x, d.pose.y);
     const dist = Math.hypot(screenX - s.x, screenY - s.y);
     if (dist <= 25) {
@@ -302,7 +303,7 @@ function render() {
   // Handle Follow-Cam smooth interpolation
   if (swarmState.followDeviceId) {
     const target = swarmState.devices.find(d => d.id === swarmState.followDeviceId);
-    if (target) {
+    if (target && target.pose) {
       const desiredX = canvas.width / 2 - target.pose.x * scale.value;
       const desiredY = canvas.height / 2 + target.pose.y * scale.value;
       offsetX.value += (desiredX - offsetX.value) * 0.1;
@@ -392,7 +393,7 @@ function drawGridAndRooms(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasEleme
 function drawDeviceTrails(ctx: CanvasRenderingContext2D) {
   ctx.save();
   for (const d of swarmState.devices) {
-    if (!d.trajectory || d.trajectory.length < 2) continue;
+    if (!d.trajectory || d.trajectory.length < 2 || !d.pose || d.pose.x === undefined) continue;
 
     ctx.beginPath();
     const first = worldToScreen(d.trajectory[0].x, d.trajectory[0].y);
@@ -438,7 +439,7 @@ function drawTargetGoal(ctx: CanvasRenderingContext2D) {
   // Connecting line from assigned device to goal
   if (g.assignedDeviceId) {
     const dev = swarmState.devices.find(d => d.id === g.assignedDeviceId);
-    if (dev) {
+    if (dev && dev.pose) {
       const ds = worldToScreen(dev.pose.x, dev.pose.y);
       ctx.beginPath();
       ctx.moveTo(ds.x, ds.y);
@@ -467,6 +468,7 @@ function drawTargetGoal(ctx: CanvasRenderingContext2D) {
 
 function drawDevices(ctx: CanvasRenderingContext2D) {
   for (const d of swarmState.devices) {
+    if (!d.pose || d.pose.x === undefined) continue;
     const s = worldToScreen(d.pose.x, d.pose.y);
     const isSelected = d.id === swarmState.selectedDeviceId;
 

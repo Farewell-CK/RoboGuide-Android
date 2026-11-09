@@ -72,9 +72,12 @@
         </div>
 
         <!-- Coordinates bar -->
-        <div class="mt-2 flex items-center justify-between text-[10px] text-slate-400 font-mono bg-slate-950/60 px-2.5 py-1 rounded-lg">
+        <div v-if="dev.pose && dev.pose.x !== undefined" class="mt-2 flex items-center justify-between text-[10px] text-slate-400 font-mono bg-slate-950/60 px-2.5 py-1 rounded-lg">
           <span>位姿 (X, Y): ({{ dev.pose.x.toFixed(2) }}, {{ dev.pose.y.toFixed(2) }})</span>
           <span>偏航 θ: {{ ((dev.pose.theta * 180) / Math.PI).toFixed(1) }}°</span>
+        </div>
+        <div v-else class="mt-2 text-[10px] text-slate-500 font-mono bg-slate-950/60 px-2.5 py-1 rounded-lg">
+          位姿与坐标: 未知 / 待中枢定位广播
         </div>
 
         <!-- Quick Action Toolbar -->
